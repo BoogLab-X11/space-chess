@@ -1,7 +1,7 @@
 import { createInitialState } from "./game/setup";
 import { applyMove, mkMove } from "./game/applyMove";
 import type { GameState, Square } from "./game/types";
-import { pieceAt, staticAt } from "./game/indexes";
+import { pieceAt, staticAt, flyerAt } from "./game/indexes";
 
 const FILES = "ABCDEFGHIJKLMNOPQRST";
 
@@ -87,12 +87,26 @@ function rookLegalDests(state: GameState, from: Square): Square[] {
         break;
       }
 
+
+      // static hazard: rook may move onto it (suicide), but cannot go past it
+      if (staticAt(state, sq)) {
+        out.push(sq);
+        break;
+      }
+
+      // flying hazard: rook may move onto it (impact), but cannot go past it
+      const hz = flyerAt(state, sq);
+      if (hz && hz.alive) {
+        out.push(sq);
+        break;
+      }
+
       const p = pieceAt(state, sq);
       if (p) {
         if (p.side !== state.sideToMove) out.push(sq); // capture
         break;
       }
-
+  
       out.push(sq);
       r += d.dr;
       c += d.dc;

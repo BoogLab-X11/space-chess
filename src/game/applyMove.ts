@@ -28,6 +28,9 @@ function isRookMoveLegal(state: GameState, from: Square, to: Square): boolean {
     // Static hazard blocks rook movement through it
     if (staticAt(state, sq)) return false;
 
+        const hz = flyerAt(state, sq);
+    if (hz && hz.alive) return false;
+
     r += dr;
     c += dc;
   }
