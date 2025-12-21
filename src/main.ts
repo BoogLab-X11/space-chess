@@ -22,6 +22,10 @@ app.appendChild(canvas);
 const ctx = canvas.getContext("2d")!;
 if (!ctx) throw new Error("2D context not available");
 
+window.addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() === "r") resetGame(42);
+});
+
 function resizeCanvasToDisplaySize() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -65,14 +69,8 @@ function screenToSquare(x: number, y: number): Square | null {
   return { r, c };
 }
 
-function rookLegalDests(state: GameState, from: Square): Square[] {
+function slideLegalDests(state: GameState, from: Square, dirs: Array<{ dr: number; dc: number }>): Square[] {
   const out: Square[] = [];
-  const dirs = [
-    { dr: -1, dc: 0 },
-    { dr: 1, dc: 0 },
-    { dr: 0, dc: -1 },
-    { dr: 0, dc: 1 },
-  ];
 
   for (const d of dirs) {
     let r = from.r + d.dr;
@@ -81,20 +79,13 @@ function rookLegalDests(state: GameState, from: Square): Square[] {
     while (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
       const sq = { r, c };
 
-      // static hazard: rook may move onto it (suicide), but cannot go past
+      // Static hazard: slider may move onto it (suicide), but cannot go past
       if (staticAt(state, sq)) {
         out.push(sq);
         break;
       }
 
-
-      // static hazard: rook may move onto it (suicide), but cannot go past it
-      if (staticAt(state, sq)) {
-        out.push(sq);
-        break;
-      }
-
-      // flying hazard: rook may move onto it (impact), but cannot go past it
+      // Flying hazard: slider may move onto it (impact), but cannot go past
       const hz = flyerAt(state, sq);
       if (hz && hz.alive) {
         out.push(sq);
@@ -106,7 +97,7 @@ function rookLegalDests(state: GameState, from: Square): Square[] {
         if (p.side !== state.sideToMove) out.push(sq); // capture
         break;
       }
-  
+
       out.push(sq);
       r += d.dr;
       c += d.dc;
@@ -114,6 +105,104 @@ function rookLegalDests(state: GameState, from: Square): Square[] {
   }
 
   return out;
+}
+
+function pawnLegalDests(state: GameState, from: Square, side: "W" | "B"): Square[] {
+  const out: Square[] = [];
+  const dir = side === "W" ? -1 : 1;
+  const startRank = side === "W" ? ROWS - 2 : 1;
+
+  const one = { r: from.r + dir, c: from.c };
+  if (one.r >= 0 && one.r < ROWS && !pieceAt(state, one) && !staticAt(state, one)) {
+    out.push(one);
+
+    // Two-square launch boost
+    const two = { r: from.r + 2 * dir, c: from.c };
+    if (
+      from.r === startRank &&
+      !pieceAt(state, two) &&
+      !staticAt(state, two)
+    ) {
+      out.push(two);
+    }
+  }
+
+  // Diagonal captures
+  for (const dc of [-1, 1]) {
+    const diag = { r: from.r + dir, c: from.c + dc };
+    if (diag.r < 0 || diag.r >= ROWS || diag.c < 0 || diag.c >= COLS) continue;
+
+    const p = pieceAt(state, diag);
+    if (p && p.side !== side) out.push(diag);
+  }
+
+  return out;
+}
+
+function knightLegalDests(state: GameState, from: Square): Square[] {
+  const out: Square[] = [];
+  const deltas = [
+    { dr: -2, dc: -1 }, { dr: -2, dc: 1 },
+    { dr: -1, dc: -2 }, { dr: -1, dc: 2 },
+    { dr: 1, dc: -2 },  { dr: 1, dc: 2 },
+    { dr: 2, dc: -1 },  { dr: 2, dc: 1 },
+  ];
+
+  for (const d of deltas) {
+    const sq = { r: from.r + d.dr, c: from.c + d.dc };
+    if (sq.r < 0 || sq.r >= ROWS || sq.c < 0 || sq.c >= COLS) continue;
+
+    // Friendly piece blocks destination
+    const p = pieceAt(state, sq);
+    if (p && p.side === state.sideToMove) continue;
+
+    // Otherwise it's selectable (empty, enemy capture, static hazard suicide, flying hazard impact)
+    out.push(sq);
+  }
+
+  return out;
+}
+
+function kingLegalDests(state: GameState, from: Square): Square[] {
+  const out: Square[] = [];
+
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (dr === 0 && dc === 0) continue;
+      const sq = { r: from.r + dr, c: from.c + dc };
+      if (sq.r < 0 || sq.r >= ROWS || sq.c < 0 || sq.c >= COLS) continue;
+
+      const p = pieceAt(state, sq);
+      if (p && p.side === state.sideToMove) continue;
+
+      out.push(sq);
+    }
+  }
+
+  return out;
+}
+
+function isKingAlive(state: GameState, side: "W" | "B"): boolean {
+  return state.pieces.some(p => p.alive && p.side === side && p.type === "K");
+}
+
+function winnerIfAny(state: GameState): "W" | "B" | null {
+  const wAlive = isKingAlive(state, "W");
+  const bAlive = isKingAlive(state, "B");
+  if (wAlive && bAlive) return null;
+  if (wAlive && !bAlive) return "W";
+  if (!wAlive && bAlive) return "B";
+  // extremely rare: both dead same tick (e.g. hazards) – call it a draw later, but for now:
+  return null;
+}
+
+let gameOver: { winner: "W" | "B" } | null = null;
+
+function resetGame(seed = 42) {
+  state = createInitialState(ROWS, COLS, seed);
+  selected = null;
+  legal = [];
+  gameOver = null;
 }
 
 // --- Input state ---
@@ -126,21 +215,66 @@ canvas.addEventListener("click", (ev) => {
   const y = ev.clientY - rect.top;
 
   const sq = screenToSquare(x, y);
+  if (gameOver) return;
+
   if (!sq) return;
 
   if (!selected) {
-    const p = pieceAt(state, sq);
-    if (p && p.side === state.sideToMove) {
-      selected = sq;
-      legal = p.type === "R" ? rookLegalDests(state, sq) : [];
-    }
-    return;
+  const p = pieceAt(state, sq);
+  if (!p) return;
+  if (p.side !== state.sideToMove) return;
+
+  selected = sq;
+
+  if (p.type === "R") {
+    legal = slideLegalDests(state, sq, [
+      { dr: -1, dc: 0 },
+      { dr: 1, dc: 0 },
+      { dr: 0, dc: -1 },
+      { dr: 0, dc: 1 },
+    ]);
+  } else if (p.type === "B") {
+    legal = slideLegalDests(state, sq, [
+      { dr: -1, dc: -1 },
+      { dr: -1, dc: 1 },
+      { dr: 1, dc: -1 },
+      { dr: 1, dc: 1 },
+    ]);
+  } else if (p.type === "P") {
+  legal = pawnLegalDests(state, sq, p.side);
+} else if (p.type === "Q") {
+    legal = slideLegalDests(state, sq, [
+      { dr: -1, dc: 0 },
+      { dr: 1, dc: 0 },
+      { dr: 0, dc: -1 },
+      { dr: 0, dc: 1 },
+      { dr: -1, dc: -1 },
+      { dr: -1, dc: 1 },
+      { dr: 1, dc: -1 },
+      { dr: 1, dc: 1 },
+    ]);
+  } else if (p.type === "N") {
+  legal = knightLegalDests(state, sq);
+} else if (p.type === "K") {
+  legal = kingLegalDests(state, sq);
+
+  } else {
+    legal = [];
   }
+
+  return;
+}
 
   // attempt move
   applyMove(state, mkMove(selected, sq));
-  selected = null;
-  legal = [];
+selected = null;
+legal = [];
+
+const win = winnerIfAny(state);
+if (win) {
+  gameOver = { winner: win };
+}
+
 });
 
 // --- Render ---
@@ -280,7 +414,21 @@ function draw(state: GameState) {
   ctx.fillStyle = "rgba(255,255,255,0.9)";
   ctx.font = "16px system-ui, sans-serif";
   ctx.fillText(`Side to move: ${state.sideToMove} | ply=${state.ply}`, 16, 26);
-  ctx.fillText(`Rooks obey rook rules; other pieces teleport (for now).`, 16, 48);
+  // ctx.fillText(`Rooks obey rook rules; other pieces teleport (for now).`, 16, 48);
+
+    if (gameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "48px system-ui, sans-serif";
+    ctx.fillText(`${gameOver.winner === "W" ? "White" : "Black"} wins`, viewW / 2, viewH / 2 - 20);
+
+    ctx.font = "18px system-ui, sans-serif";
+    ctx.fillText(`Press R to restart`, viewW / 2, viewH / 2 + 30);
+  }
 }
 
 function loop() {

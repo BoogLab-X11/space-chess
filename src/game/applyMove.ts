@@ -8,27 +8,22 @@ function other(side: "W" | "B"): "W" | "B" {
   return side === "W" ? "B" : "W";
 }
 
-function isRookMoveLegal(state: GameState, from: Square, to: Square): boolean {
-  const sameRow = from.r === to.r;
-  const sameCol = from.c === to.c;
-  if (!sameRow && !sameCol) return false;
-
-  const dr = sameRow ? 0 : (to.r > from.r ? 1 : -1);
-  const dc = sameCol ? 0 : (to.c > from.c ? 1 : -1);
-
-  // Walk squares between from and to (exclusive)
+function pathClearForSlide(state: GameState, from: Square, to: Square, dr: number, dc: number): boolean {
   let r = from.r + dr;
   let c = from.c + dc;
+
+  // walk squares between from and to (exclusive)
   while (r !== to.r || c !== to.c) {
     const sq = { r, c };
 
-    // Any piece blocks
+    // Pieces block
     if (pieceAt(state, sq)) return false;
 
-    // Static hazard blocks rook movement through it
+    // Static hazards block
     if (staticAt(state, sq)) return false;
 
-        const hz = flyerAt(state, sq);
+    // Flying hazards also block sliding rays
+    const hz = flyerAt(state, sq);
     if (hz && hz.alive) return false;
 
     r += dr;
@@ -37,6 +32,89 @@ function isRookMoveLegal(state: GameState, from: Square, to: Square): boolean {
 
   return true;
 }
+
+function isRookMoveLegal(state: GameState, from: Square, to: Square): boolean {
+  if (from.r === to.r && from.c !== to.c) {
+    const dc = to.c > from.c ? 1 : -1;
+    return pathClearForSlide(state, from, to, 0, dc);
+  }
+  if (from.c === to.c && from.r !== to.r) {
+    const dr = to.r > from.r ? 1 : -1;
+    return pathClearForSlide(state, from, to, dr, 0);
+  }
+  return false;
+}
+
+function isKnightMoveLegal(from: Square, to: Square): boolean {
+  const dr = Math.abs(to.r - from.r);
+  const dc = Math.abs(to.c - from.c);
+  return (dr === 2 && dc === 1) || (dr === 1 && dc === 2);
+}
+
+function isKingMoveLegal(from: Square, to: Square): boolean {
+  const dr = Math.abs(to.r - from.r);
+  const dc = Math.abs(to.c - from.c);
+  // no castling (spacecraft), just one square any direction
+  return (dr <= 1 && dc <= 1) && !(dr === 0 && dc === 0);
+}
+
+
+function isBishopMoveLegal(state: GameState, from: Square, to: Square): boolean {
+  const dr = to.r - from.r;
+  const dc = to.c - from.c;
+  if (dr === 0 || dc === 0) return false;
+  if (Math.abs(dr) !== Math.abs(dc)) return false;
+
+  const stepR = dr > 0 ? 1 : -1;
+  const stepC = dc > 0 ? 1 : -1;
+  return pathClearForSlide(state, from, to, stepR, stepC);
+}
+
+function isPawnMoveLegal(state: GameState, from: Square, to: Square, side: "W" | "B"): boolean {
+  const dir = side === "W" ? -1 : 1; // white moves "up" the board visually
+  const startRank = side === "W" ? state.rows - 2 : 1; // rank 2 or 9 internally
+
+  const dr = to.r - from.r;
+  const dc = to.c - from.c;
+
+  const destPiece = pieceAt(state, to);
+
+  // Straight forward move
+  if (dc === 0) {
+    // One square forward
+    if (dr === dir && !destPiece && !staticAt(state, to)) {
+      return true;
+    }
+
+    // Two-square launch boost from starting rank
+    if (
+      from.r === startRank &&
+      dr === 2 * dir &&
+      !destPiece
+    ) {
+      const mid = { r: from.r + dir, c: from.c };
+      if (pieceAt(state, mid)) return false;
+      if (staticAt(state, mid)) return false;
+      if (staticAt(state, to)) return false;
+      return true;
+    }
+  }
+
+  // Diagonal capture
+  if (Math.abs(dc) === 1 && dr === dir) {
+    if (destPiece && destPiece.side !== side) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+function isQueenMoveLegal(state: GameState, from: Square, to: Square): boolean {
+  return isRookMoveLegal(state, from, to) || isBishopMoveLegal(state, from, to);
+}
+
 
 function postMoveHazardsAndTurnAdvance(state: GameState): void {
   // Hazards tick after each player move (with spawn)
@@ -72,8 +150,21 @@ export function applyMove(state: GameState, move: Move): void {
 
   // Rook legality only (others are teleport)
   if (mover.type === "R") {
-    if (!isRookMoveLegal(state, move.from, move.to)) return;
-  }
+  if (!isRookMoveLegal(state, move.from, move.to)) return;
+} else if (mover.type === "B") {
+  if (!isBishopMoveLegal(state, move.from, move.to)) return;
+} else if (mover.type === "Q") {
+  if (!isQueenMoveLegal(state, move.from, move.to)) return;
+} else if (mover.type === "P") {
+  if (!isPawnMoveLegal(state, move.from, move.to, mover.side)) return;
+} else if (mover.type === "N") {
+  if (!isKnightMoveLegal(move.from, move.to)) return;
+} else if (mover.type === "K") {
+  if (!isKingMoveLegal(move.from, move.to)) return;
+}
+
+
+
 
   // Landing on a flying hazard => impact destroys both; move consumed
   const destHz = flyerAt(state, move.to);
