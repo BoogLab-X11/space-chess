@@ -108,7 +108,7 @@ export function createInitialState(rows: number, cols: number, seed = 123456): G
   // Star
   placeOne("star", starBeltRankMin, starBeltRankMax, starBeltColMin, starBeltColMax);
 
-  return {
+    return {
     rows,
     cols,
     sideToMove: "W",
@@ -116,6 +116,8 @@ export function createInitialState(rows: number, cols: number, seed = 123456): G
     pieces,
     statics,
     flyers: [],
+    manufacturing: { W: 0, B: 0 },
     rngSeed: seed >>> 0,
   };
+
 }

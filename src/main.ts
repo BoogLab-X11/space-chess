@@ -129,7 +129,7 @@ function pawnLegalDests(state: GameState, from: Square, side: "W" | "B"): Square
 const one = { r: from.r + dir, c: from.c };
 if (one.r >= 0 && one.r < ROWS) {
   const destPiece = pieceAt(state, one);
-  const hz1 = flyerAt(state, one);
+ // const hz1 = flyerAt(state, one);
 
   // Pawns may move forward if no piece blocks the square
   if (!destPiece) {
@@ -273,6 +273,8 @@ function cloneState(s: GameState): GameState {
     sideToMove: s.sideToMove,
     ply: s.ply,
     rngSeed: s.rngSeed,
+    manufacturing: { W: s.manufacturing.W, B: s.manufacturing.B },
+
 
     pieces: s.pieces.map(p => ({
       id: p.id,
@@ -289,11 +291,13 @@ function cloneState(s: GameState): GameState {
     })),
 
     flyers: s.flyers.map(hz => ({
-      id: hz.id,
-      pos: { r: hz.pos.r, c: hz.pos.c },
-      dir: hz.dir,
-      alive: hz.alive,
-    })),
+  id: hz.id,
+  kind: hz.kind,
+  pos: { r: hz.pos.r, c: hz.pos.c },
+  dir: hz.dir,
+  alive: hz.alive,
+})),
+
   };
 }
 

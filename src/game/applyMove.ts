@@ -221,19 +221,32 @@ export function applyMove(state: GameState, move: Move): void {
 
 
   // Landing on a flying hazard => impact destroys both; move consumed
-  const destHz = flyerAt(state, move.to);
+    const destHz = flyerAt(state, move.to);
   if (destHz && destHz.alive) {
-  // Treat as moving into the square, then exploding
-  mover.pos = { ...move.to };
-  mover.alive = false;
+    if (destHz.kind === "comet") {
+      // Treat as moving into the square, then exploding
+      mover.pos = { ...move.to };
+      mover.alive = false;
 
-  destHz.alive = false;
-  state.flyers = state.flyers.filter(h => h.alive);
+      destHz.alive = false;
+      state.flyers = state.flyers.filter(h => h.alive);
 
-  burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
-  postMoveHazardsAndTurnAdvance(state, mover.side);
-  return;
-}
+      burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
+      postMoveHazardsAndTurnAdvance(state, mover.side);
+      return;
+    } else {
+      // Asteroid: collect (+1 manufacturing), asteroid disappears, mover survives
+      mover.pos = { ...move.to };
+
+      destHz.alive = false;
+      state.flyers = state.flyers.filter(h => h.alive);
+
+      state.manufacturing[mover.side] += 1;
+
+      // Continue with normal move resolution (captures etc.) below
+    }
+  }
+
 
 
   // Capture enemy on destination (if present)

@@ -22,16 +22,21 @@ export type StaticHazard = {
 
 export type HazardDir = "E" | "W" | "N" | "S";
 
+export type FlyingHazardKind = "comet" | "asteroid";
+
 export type FlyingHazard = {
   id: string;
+  kind: FlyingHazardKind;
   pos: Square;
   dir: HazardDir;
   alive: boolean;
 };
 
+
 export type GameState = {
   rows: number;
   cols: number;
+  manufacturing: { W: number; B: number };
 
   sideToMove: Side;
   ply: number; // increments each player move (white move=1, black move=2, ...)
