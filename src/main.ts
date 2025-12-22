@@ -3,6 +3,17 @@ import { applyMove, mkMove } from "./game/applyMove";
 import type { GameState, Square } from "./game/types";
 import { pieceAt, staticAt, flyerAt } from "./game/indexes";
 
+// --- Audio (retro explosion) ---
+let audioCtx: AudioContext | null = null;
+
+function getAudioCtx(): AudioContext {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  }
+  return audioCtx;
+}
+
+
 const FILES = "ABCDEFGHIJKLMNOPQRST";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -112,20 +123,40 @@ function pawnLegalDests(state: GameState, from: Square, side: "W" | "B"): Square
   const dir = side === "W" ? -1 : 1;
   const startRank = side === "W" ? ROWS - 2 : 1;
 
-  const one = { r: from.r + dir, c: from.c };
-  if (one.r >= 0 && one.r < ROWS && !pieceAt(state, one) && !staticAt(state, one)) {
+  // Forward moves (including suicidal moves into hazards)
+const one = { r: from.r + dir, c: from.c };
+if (one.r >= 0 && one.r < ROWS) {
+  const destPiece = pieceAt(state, one);
+  const hz1 = flyerAt(state, one);
+
+  // Pawns may move forward if no piece blocks the square
+  if (!destPiece) {
+    // Empty square OR hazard square are both legal destinations
     out.push(one);
 
-    // Two-square launch boost
+    // Two-square launch boost from starting rank
     const two = { r: from.r + 2 * dir, c: from.c };
     if (
       from.r === startRank &&
-      !pieceAt(state, two) &&
-      !staticAt(state, two)
+      two.r >= 0 &&
+      two.r < ROWS
     ) {
-      out.push(two);
+      const mid = { r: from.r + dir, c: from.c };
+
+      // Mid-square must not contain a piece or static hazard
+      if (
+        !pieceAt(state, mid) &&
+        !staticAt(state, mid)
+      ) {
+        // Destination must not have a piece (hazards OK)
+        if (!pieceAt(state, two)) {
+          out.push(two);
+        }
+      }
     }
   }
+}
+
 
   // Diagonal captures
   for (const dc of [-1, 1]) {
@@ -209,10 +240,179 @@ function resetGame(seed = 42) {
 let selected: Square | null = null;
 let legal: Square[] = [];
 
+type Explosion = {
+  sq: Square;        // board square where it happened
+  t0: number;        // start time (ms)
+  ttl: number;       // duration (ms)
+};
+
+const explosions: Explosion[] = [];
+
+
+// --------------------
+// Black AI (v1)
+// --------------------
+
+type CandidateMove = { from: Square; to: Square };
+
+function cloneState(s: GameState): GameState {
+  return {
+    rows: s.rows,
+    cols: s.cols,
+    sideToMove: s.sideToMove,
+    ply: s.ply,
+    rngSeed: s.rngSeed,
+
+    pieces: s.pieces.map(p => ({
+      id: p.id,
+      side: p.side,
+      type: p.type,
+      pos: { r: p.pos.r, c: p.pos.c },
+      alive: p.alive,
+      heated: p.heated,
+    })),
+
+    statics: s.statics.map(h => ({
+      kind: h.kind,
+      pos: { r: h.pos.r, c: h.pos.c },
+    })),
+
+    flyers: s.flyers.map(hz => ({
+      id: hz.id,
+      pos: { r: hz.pos.r, c: hz.pos.c },
+      dir: hz.dir,
+      alive: hz.alive,
+    })),
+  };
+}
+
+function isKingAliveLocal(state: GameState, side: "W" | "B"): boolean {
+  return state.pieces.some(p => p.alive && p.side === side && p.type === "K");
+}
+
+function pieceValueLocal(t: string): number {
+  switch (t) {
+    case "P": return 1;
+    case "N": return 3;
+    case "B": return 3;
+    case "R": return 5;
+    case "Q": return 9;
+    case "K": return 1000;
+    default: return 0;
+  }
+}
+
+// Score from BLACK’s perspective: positive is good for Black
+function evaluateForBlack(state: GameState): number {
+  const wAlive = isKingAliveLocal(state, "W");
+  const bAlive = isKingAliveLocal(state, "B");
+
+  if (!bAlive && wAlive) return -1_000_000;
+  if (bAlive && !wAlive) return 1_000_000;
+  if (!bAlive && !wAlive) return 0;
+
+  let score = 0;
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    const v = pieceValueLocal(p.type);
+    score += (p.side === "B") ? v : -v;
+  }
+
+  // tiny nudge: avoid staying heated
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side === "B" && p.heated) score -= 0.25;
+    if (p.side === "W" && p.heated) score += 0.25;
+  }
+
+  return score;
+}
+
+function legalMovesForBlack(state: GameState): CandidateMove[] {
+  // IMPORTANT: this generator assumes it's Black to move
+  // because your helper functions treat state.sideToMove as "friendly".
+  if (state.sideToMove !== "B") return [];
+
+  const moves: CandidateMove[] = [];
+
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== "B") continue;
+
+    const from = { r: p.pos.r, c: p.pos.c };
+    let dests: Square[] = [];
+
+    if (p.type === "R") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+      ]);
+    } else if (p.type === "B") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "Q") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "P") {
+      dests = pawnLegalDests(state, from, "B");
+    } else if (p.type === "N") {
+      dests = knightLegalDests(state, from);
+    } else if (p.type === "K") {
+      dests = kingLegalDests(state, from);
+    }
+
+    for (const to of dests) moves.push({ from, to });
+  }
+
+  return moves;
+}
+
+function chooseBlackMove(state: GameState): CandidateMove | null {
+  if (state.sideToMove !== "B") return null;
+
+  const candidates = legalMovesForBlack(state);
+  if (candidates.length === 0) return null;
+
+  let best: CandidateMove | null = null;
+  let bestScore = -Infinity;
+
+  for (const m of candidates) {
+    const sim = cloneState(state);
+    applyMove(sim, mkMove(m.from, m.to)); // includes hazards + star burn
+    const score = evaluateForBlack(sim);
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+
+  return best;
+}
+
+function runBlackAIIfNeeded() {
+  if (gameOver) return;
+  if (state.sideToMove !== "B") return;
+
+  const m = chooseBlackMove(state);
+  if (!m) return;
+
+  // clear any selection UI
+  selected = null;
+  legal = [];
+
+  applyMove(state, mkMove(m.from, m.to));
+}
+
 canvas.addEventListener("click", (ev) => {
   const rect = canvas.getBoundingClientRect();
   const x = ev.clientX - rect.left;
   const y = ev.clientY - rect.top;
+  const aliveBefore = new Set(
+  state.pieces.filter(p => p.alive).map(p => p.id)
+);
+
 
   const sq = screenToSquare(x, y);
   if (gameOver) return;
@@ -270,14 +470,86 @@ canvas.addEventListener("click", (ev) => {
 selected = null;
 legal = [];
 
-const win = winnerIfAny(state);
-if (win) {
-  gameOver = { winner: win };
+for (const p of state.pieces) {
+  if (aliveBefore.has(p.id) && !p.alive) {
+    spawnExplosion(p.pos);
+  }
 }
+
+
+// Check win after White's move
+  let win = winnerIfAny(state);
+  if (win) {
+    gameOver = { winner: win };
+    return;
+  }
+
+  // Black AI responds (if it's now Black's turn)
+  runBlackAIIfNeeded();
+
+  // Check win after Black's response
+  win = winnerIfAny(state);
+  if (win) {
+    gameOver = { winner: win };
+    return;
+  }
 
 });
 
 // --- Render ---
+
+function playExplosionSound() {
+  const ctx = getAudioCtx();
+  const duration = 0.8; // seconds
+  const sampleRate = ctx.sampleRate;
+  const frameCount = Math.floor(sampleRate * duration);
+
+  // Create noise buffer
+  const buffer = ctx.createBuffer(1, frameCount, sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < frameCount; i++) {
+    data[i] = Math.random() * 2 - 1; // white noise
+  }
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+
+  // Low-pass filter with falling cutoff (key retro effect)
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(22000, ctx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(
+    12000,
+    ctx.currentTime + duration
+  );
+//
+  // Gain envelope (fast attack, decay)
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(
+    0.8,
+    ctx.currentTime + 0.02
+  );
+  gain.gain.exponentialRampToValueAtTime(
+    0.0001,
+    ctx.currentTime + duration
+  );
+
+  // Wire it up
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(ctx.destination);
+
+  source.start();
+  source.stop(ctx.currentTime + duration);
+}
+
+function spawnExplosion(sq: Square, ttl = 1000) {
+  explosions.push({ sq, t0: performance.now(), ttl });
+  playExplosionSound();
+}
+
+
 function draw(state: GameState) {
   const rect = canvas.getBoundingClientRect();
   const viewW = rect.width;
@@ -360,13 +632,73 @@ function draw(state: GameState) {
   }
 
   // Flying hazards
+    // Flying hazards (directional: bright core + tail)
   for (const hz of state.flyers) {
     const cx = x0 + (hz.pos.c + 0.5) * tileSize;
     const cy = y0 + (hz.pos.r + 0.5) * tileSize;
-    ctx.fillStyle = "#a0aec0";
+
+    // Direction unit vector (movement direction)
+    let dx = 0, dy = 0;
+    switch (hz.dir) {
+      case "E": dx = 1; dy = 0; break;
+      case "W": dx = -1; dy = 0; break;
+      case "N": dx = 0; dy = -1; break;
+      case "S": dx = 0; dy = 1; break;
+    }
+
+    // Tail points opposite the direction of travel
+    const tailLen = tileSize * 0.50;
+    const tailWidth = tileSize * 0.25;
+
+    const tx = cx - dx * tailLen;
+    const ty = cy - dy * tailLen;
+
+    // Draw tail as a tapered quad (sprite-friendly silhouette)
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+
+    // Tail color (warm-ish) - reads like a comet; you can change later
+    ctx.fillStyle = "rgba(248, 15, 3, 0.55)";
     ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.18, 0, Math.PI * 2);
+
+    // Perpendicular vector for width
+    const px = -dy;
+    const py = dx;
+
+    // Tail near head (wider)
+    const hx1 = cx + px * (tailWidth * 0.70);
+    const hy1 = cy + py * (tailWidth * 0.70);
+    const hx2 = cx - px * (tailWidth * 0.70);
+    const hy2 = cy - py * (tailWidth * 0.70);
+
+    // Tail end (narrower)
+    const ex1 = tx + px * (tailWidth * 0.10);
+    const ey1 = ty + py * (tailWidth * 0.10);
+    const ex2 = tx - px * (tailWidth * 0.10);
+    const ey2 = ty - py * (tailWidth * 0.10);
+
+    ctx.moveTo(hx1, hy1);
+    ctx.lineTo(hx2, hy2);
+    ctx.lineTo(ex2, ey2);
+    ctx.lineTo(ex1, ey1);
+    ctx.closePath();
     ctx.fill();
+
+    // Core (the "rock" / "head")
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#c77e47ff";
+    ctx.beginPath();
+    ctx.arc(cx, cy, tileSize * 0.17, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tiny highlight offset slightly forward (suggests motion direction)
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "rgba(203, 165, 116, 0.85)";
+    ctx.beginPath();
+    ctx.arc(cx + dx * tileSize * 0.07, cy + dy * tileSize * 0.07, tileSize * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }
 
   // Pieces
@@ -395,6 +727,50 @@ function draw(state: GameState) {
     ctx.textBaseline = "middle";
     ctx.fillText(p.type, cx, cy);
   }
+
+    // Explosions (short-lived)
+  const now = performance.now();
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    const e = explosions[i];
+    const age = now - e.t0;
+    if (age >= e.ttl) {
+      explosions.splice(i, 1);
+      continue;
+    }
+
+    const t = age / e.ttl; // 0..1
+    const cx = x0 + (e.sq.c + 0.5) * tileSize;
+    const cy = y0 + (e.sq.r + 0.5) * tileSize;
+
+    // Simple expanding ring + faint core (unobtrusive)
+    const r1 = tileSize * (0.10 + 0.55 * t);
+    const r2 = tileSize * (0.06 + 0.30 * t);
+
+    ctx.save();
+
+    // Fade over time
+    ctx.globalAlpha = 0.85 * (1 - t);
+
+    // Outer explosion ring (hot orange → red)
+    ctx.strokeStyle = `rgba(255, ${Math.floor(160 * (1 - t))}, 0, 1)`;
+    ctx.lineWidth = Math.max(1, tileSize * 0.07 * (1 - t));
+
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r1, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner core
+    ctx.globalAlpha = 0.65 * (1 - t);
+    ctx.fillStyle = "rgba(255, 60, 0, 1)";
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
 
   // Selected square highlight
   if (selected) {

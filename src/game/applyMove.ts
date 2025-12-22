@@ -79,33 +79,50 @@ function isPawnMoveLegal(state: GameState, from: Square, to: Square, side: "W" |
 
   const destPiece = pieceAt(state, to);
 
-  // Straight forward move
+    // Straight forward move
   if (dc === 0) {
+    const hz = flyerAt(state, to);
+
     // One square forward
-    if (dr === dir && !destPiece && !staticAt(state, to)) {
-      return true;
+    if (dr === dir && !destPiece) {
+      // normal move onto empty square
+      if (!staticAt(state, to) && !(hz && hz.alive)) return true;
+
+      // suicidal move into static or flying hazard
+      if (staticAt(state, to)) return true;
+      if (hz && hz.alive) return true;
     }
 
     // Two-square launch boost from starting rank
-    if (
-      from.r === startRank &&
-      dr === 2 * dir &&
-      !destPiece
-    ) {
+    if (from.r === startRank && dr === 2 * dir && !destPiece) {
       const mid = { r: from.r + dir, c: from.c };
+
+      // mid-square must be clear of pieces and static hazards
       if (pieceAt(state, mid)) return false;
       if (staticAt(state, mid)) return false;
-      if (staticAt(state, to)) return false;
-      return true;
+
+      // destination can be empty OR hazard (suicidal)
+      const hz2 = flyerAt(state, to);
+      if (!staticAt(state, to) && !(hz2 && hz2.alive)) return true;
+      if (staticAt(state, to)) return true;
+      if (hz2 && hz2.alive) return true;
     }
   }
 
   // Diagonal capture
+    // Diagonal capture OR diagonal suicide into hazards
   if (Math.abs(dc) === 1 && dr === dir) {
-    if (destPiece && destPiece.side !== side) {
-      return true;
-    }
+    // capture
+    if (destPiece && destPiece.side !== side) return true;
+
+    // suicide into static hazard
+    if (staticAt(state, to)) return true;
+
+    // suicide into flying hazard
+    const hz = flyerAt(state, to);
+    if (hz && hz.alive) return true;
   }
+
 
   return false;
 }
@@ -169,14 +186,17 @@ export function applyMove(state: GameState, move: Move): void {
   // Landing on a flying hazard => impact destroys both; move consumed
   const destHz = flyerAt(state, move.to);
   if (destHz && destHz.alive) {
-    mover.alive = false;
-    destHz.alive = false;
-    state.flyers = state.flyers.filter(h => h.alive);
+  // Treat as moving into the square, then exploding
+  mover.pos = { ...move.to };
+  mover.alive = false;
 
-    // No heat marking needed for a dead mover, but hazards still tick and turn advances
-    postMoveHazardsAndTurnAdvance(state);
-    return;
-  }
+  destHz.alive = false;
+  state.flyers = state.flyers.filter(h => h.alive);
+
+  postMoveHazardsAndTurnAdvance(state);
+  return;
+}
+
 
   // Capture enemy on destination (if present)
   if (destPiece && destPiece.side !== mover.side) {
@@ -185,10 +205,12 @@ export function applyMove(state: GameState, move: Move): void {
 
   // Landing on static hazard => suicidal move (mover dies, doesn't occupy the square)
   if (staticAt(state, move.to)) {
-    mover.alive = false;
-    postMoveHazardsAndTurnAdvance(state);
-    return;
-  }
+  mover.pos = { ...move.to };
+  mover.alive = false;
+  postMoveHazardsAndTurnAdvance(state);
+  return;
+}
+
 
   // Normal move
   mover.pos = { ...move.to };
