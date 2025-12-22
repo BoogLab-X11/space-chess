@@ -165,8 +165,9 @@ function postMoveHazardsAndTurnAdvance(state: GameState, moverSide: "W" | "B"): 
   // White move, Black move, Hazards tick, repeat.
   // So only tick hazards after Black has moved.
   if (moverSide === "B") {
-    maybeSpawnHazards(state);
+    
     hazardTick(state);
+    maybeSpawnHazards(state);
   }
 
   state.sideToMove = other(state.sideToMove);

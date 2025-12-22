@@ -672,73 +672,75 @@ function draw(state: GameState) {
 
   // Flying hazards
     // Flying hazards (directional: bright core + tail)
-  for (const hz of state.flyers) {
-    const cx = x0 + (hz.pos.c + 0.5) * tileSize;
-    const cy = y0 + (hz.pos.r + 0.5) * tileSize;
+ for (const hz of state.flyers) {
+  const cx = x0 + (hz.pos.c + 0.5) * tileSize;
+  const cy = y0 + (hz.pos.r + 0.5) * tileSize;
 
-    // Direction unit vector (movement direction)
-    let dx = 0, dy = 0;
-    switch (hz.dir) {
-      case "E": dx = 1; dy = 0; break;
-      case "W": dx = -1; dy = 0; break;
-      case "N": dx = 0; dy = -1; break;
-      case "S": dx = 0; dy = 1; break;
-    }
-
-    // Tail points opposite the direction of travel
-    const tailLen = tileSize * 0.50;
-    const tailWidth = tileSize * 0.25;
-
-    const tx = cx - dx * tailLen;
-    const ty = cy - dy * tailLen;
-
-    // Draw tail as a tapered quad (sprite-friendly silhouette)
-    ctx.save();
-    ctx.globalAlpha = 0.85;
-
-    // Tail color (warm-ish) - reads like a comet; you can change later
-    ctx.fillStyle = "rgba(248, 15, 3, 0.55)";
-    ctx.beginPath();
-
-    // Perpendicular vector for width
-    const px = -dy;
-    const py = dx;
-
-    // Tail near head (wider)
-    const hx1 = cx + px * (tailWidth * 0.70);
-    const hy1 = cy + py * (tailWidth * 0.70);
-    const hx2 = cx - px * (tailWidth * 0.70);
-    const hy2 = cy - py * (tailWidth * 0.70);
-
-    // Tail end (narrower)
-    const ex1 = tx + px * (tailWidth * 0.10);
-    const ey1 = ty + py * (tailWidth * 0.10);
-    const ex2 = tx - px * (tailWidth * 0.10);
-    const ey2 = ty - py * (tailWidth * 0.10);
-
-    ctx.moveTo(hx1, hy1);
-    ctx.lineTo(hx2, hy2);
-    ctx.lineTo(ex2, ey2);
-    ctx.lineTo(ex1, ey1);
-    ctx.closePath();
-    ctx.fill();
-
-    // Core (the "rock" / "head")
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = "#c77e47ff";
-    ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.17, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Tiny highlight offset slightly forward (suggests motion direction)
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = "rgba(203, 165, 116, 0.85)";
-    ctx.beginPath();
-    ctx.arc(cx + dx * tileSize * 0.07, cy + dy * tileSize * 0.07, tileSize * 0.05, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.restore();
+  let dx = 0, dy = 0;
+  switch (hz.dir) {
+    case "E": dx = 1; dy = 0; break;
+    case "W": dx = -1; dy = 0; break;
+    case "N": dx = 0; dy = -1; break;
+    case "S": dx = 0; dy = 1; break;
   }
+
+  const isAsteroid = hz.kind === "asteroid";
+
+  const tailLen = tileSize * (isAsteroid ? 0.28 : 0.50);
+  const tailWidth = tileSize * (isAsteroid ? 0.18 : 0.25);
+
+  const tx = cx - dx * tailLen;
+  const ty = cy - dy * tailLen;
+
+  ctx.save();
+  ctx.globalAlpha = isAsteroid ? 0.75 : 0.85;
+
+  // Tail
+  ctx.fillStyle = isAsteroid
+    ? "rgba(180, 190, 205, 0.45)"
+    : "rgba(248, 15, 3, 0.55)";
+
+  ctx.beginPath();
+
+  const px = -dy;
+  const py = dx;
+
+  const hx1 = cx + px * (tailWidth * 0.70);
+  const hy1 = cy + py * (tailWidth * 0.70);
+  const hx2 = cx - px * (tailWidth * 0.70);
+  const hy2 = cy - py * (tailWidth * 0.70);
+
+  const ex1 = tx + px * (tailWidth * 0.10);
+  const ey1 = ty + py * (tailWidth * 0.10);
+  const ex2 = tx - px * (tailWidth * 0.10);
+  const ey2 = ty - py * (tailWidth * 0.10);
+
+  ctx.moveTo(hx1, hy1);
+  ctx.lineTo(hx2, hy2);
+  ctx.lineTo(ex2, ey2);
+  ctx.lineTo(ex1, ey1);
+  ctx.closePath();
+  ctx.fill();
+
+  // Core
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = isAsteroid ? "#8a96a6" : "#c77e47ff";
+  ctx.beginPath();
+  ctx.arc(cx, cy, tileSize * (isAsteroid ? 0.15 : 0.17), 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  ctx.globalAlpha = isAsteroid ? 0.65 : 0.9;
+  ctx.fillStyle = isAsteroid
+    ? "rgba(230, 235, 245, 0.65)"
+    : "rgba(203, 165, 116, 0.85)";
+
+  ctx.beginPath();
+  ctx.arc(cx + dx * tileSize * 0.07, cy + dy * tileSize * 0.07, tileSize * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
 
   // Pieces
   for (const p of state.pieces) {
