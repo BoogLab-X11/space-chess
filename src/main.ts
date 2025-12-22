@@ -34,7 +34,7 @@ const ctx = canvas.getContext("2d")!;
 if (!ctx) throw new Error("2D context not available");
 
 window.addEventListener("keydown", (e) => {
-  if (e.key.toLowerCase() === "r") resetGame(42);
+  if (e.key.toLowerCase() === "r") resetGame();
 });
 
 function resizeCanvasToDisplaySize() {
@@ -50,8 +50,8 @@ resizeCanvasToDisplaySize();
 // --- Game state ---
 const ROWS = 10;
 const COLS = 20;
-let state: GameState = createInitialState(ROWS, COLS, 42);
-const AI_THINK_MS = 500; // tweak this
+let state: GameState = createInitialState(ROWS, COLS, Date.now());
+const AI_THINK_MS = 900; // tweak this
 
 
 // --- Board layout ---
@@ -231,7 +231,7 @@ function winnerIfAny(state: GameState): "W" | "B" | null {
 
 let gameOver: { winner: "W" | "B" } | null = null;
 
-function resetGame(seed = 42) {
+function resetGame(seed = Date.now()) {
   state = createInitialState(ROWS, COLS, seed);
   selected = null;
   legal = [];
@@ -241,6 +241,7 @@ function resetGame(seed = 42) {
   aiThinking = false;
   aiToken = 0;
 }
+
 
 
 // --- Input state ---
@@ -410,33 +411,34 @@ function runBlackAIIfNeeded() {
   const myToken = ++aiToken;
 
   window.setTimeout(() => {
-    // If something changed while "thinking" (reset, game over, not black's turn), abort.
     if (myToken !== aiToken) { aiThinking = false; return; }
     if (gameOver) { aiThinking = false; return; }
     if (state.sideToMove !== "B") { aiThinking = false; return; }
 
     const m = chooseBlackMove(state);
-    if (!m) {
-      aiThinking = false;
-      return;
-    }
+    if (!m) { aiThinking = false; return; }
 
-    // Mark last black destination square for UI
+    // Marker for UI: where Black moved to
     lastBlackMoveTo = { r: m.to.r, c: m.to.c };
 
-    // clear any selection UI
-    selected = null;
-    legal = [];
+    // Explosions: snapshot before applying the move
+    const aliveBefore = new Set(
+      state.pieces.filter(p => p.alive).map(p => p.id)
+    );
 
-    // Apply the AI move (hazards tick inside applyMove after the move)
-    // (Your explosion-diff code should remain around this call, if you added it.)
+    // Apply move (hazards tick inside applyMove AFTER the move)
     applyMove(state, mkMove(m.from, m.to));
 
-    // Check win after Black's move
-    const win = winnerIfAny(state);
-    if (win) {
-      gameOver = { winner: win };
+    // Explosions: detect deaths caused by the move OR hazard tick OR star burn
+    for (const p of state.pieces) {
+      if (aliveBefore.has(p.id) && !p.alive) {
+        spawnExplosion(p.pos);
+      }
     }
+
+    // Win check after Black's move
+    const win = winnerIfAny(state);
+    if (win) gameOver = { winner: win };
 
     aiThinking = false;
   }, AI_THINK_MS);

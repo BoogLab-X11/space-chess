@@ -1,8 +1,34 @@
 import type { GameState, Move, Square } from "./types";
 import { inBounds } from "./geom";
 import { pieceAt, staticAt, flyerAt } from "./indexes";
-import { markHeatAfterMove, resolveHeatAtTurnStart } from "./starHeat";
+import { markHeatAfterMove } from "./starHeat";
 import { hazardTick, maybeSpawnHazards } from "./hazards";
+
+function isAdjacent(a: Square, b: Square): boolean {
+  return Math.abs(a.r - b.r) <= 1 && Math.abs(a.c - b.c) <= 1 && !(a.r === b.r && a.c === b.c);
+}
+
+function burnOverheatedPiecesIfStillAdjacentToStar(
+  state: GameState,
+  side: "W" | "B",
+  overheatedIdsAtTurnStart: Set<string>
+): void {
+  const stars = state.statics.filter(h => h.kind === "star").map(h => h.pos);
+  if (stars.length === 0) return;
+
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== side) continue;
+    if (!overheatedIdsAtTurnStart.has(p.id)) continue;
+
+    // If still adjacent to ANY star at end of this side's action, burn it
+    const stillAdjacent = stars.some(spos => isAdjacent(p.pos, spos));
+    if (stillAdjacent) {
+      p.alive = false;
+    }
+  }
+}
+
 
 function other(side: "W" | "B"): "W" | "B" {
   return side === "W" ? "B" : "W";
@@ -133,15 +159,19 @@ function isQueenMoveLegal(state: GameState, from: Square, to: Square): boolean {
 }
 
 
-function postMoveHazardsAndTurnAdvance(state: GameState): void {
-  // Hazards tick after each player move (with spawn)
-  maybeSpawnHazards(state);
-  hazardTick(state);
+function postMoveHazardsAndTurnAdvance(state: GameState, moverSide: "W" | "B"): void {
+  // New rule: hazards tick once per full round:
+  // White move, Black move, Hazards tick, repeat.
+  // So only tick hazards after Black has moved.
+  if (moverSide === "B") {
+    maybeSpawnHazards(state);
+    hazardTick(state);
+  }
 
-  // Next turn
   state.sideToMove = other(state.sideToMove);
   state.ply += 1;
 }
+
 
 /**
  * Minimal move applier:
@@ -153,7 +183,13 @@ function postMoveHazardsAndTurnAdvance(state: GameState): void {
  */
 export function applyMove(state: GameState, move: Move): void {
   // Start-of-turn: resolve burn for heated pieces of this side
-  resolveHeatAtTurnStart(state);
+    // Star heat rule:
+  // If a piece was heated at the start of this side's turn, it must end this turn NOT adjacent to a star,
+  // otherwise it burns. So we record who was heated now, and burn them after the move resolves.
+  const overheatedIdsAtTurnStart = new Set(
+    state.pieces.filter(p => p.alive && p.side === state.sideToMove && p.heated).map(p => p.id)
+  );
+
 
   const mover = pieceAt(state, move.from);
   if (!mover || !mover.alive) return;
@@ -193,7 +229,8 @@ export function applyMove(state: GameState, move: Move): void {
   destHz.alive = false;
   state.flyers = state.flyers.filter(h => h.alive);
 
-  postMoveHazardsAndTurnAdvance(state);
+  burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
+  postMoveHazardsAndTurnAdvance(state, mover.side);
   return;
 }
 
@@ -207,7 +244,8 @@ export function applyMove(state: GameState, move: Move): void {
   if (staticAt(state, move.to)) {
   mover.pos = { ...move.to };
   mover.alive = false;
-  postMoveHazardsAndTurnAdvance(state);
+  burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
+  postMoveHazardsAndTurnAdvance(state, mover.side);
   return;
 }
 
@@ -217,8 +255,10 @@ export function applyMove(state: GameState, move: Move): void {
 
   // Mark heat for mover's side after move (any of their pieces adjacent become heated)
   markHeatAfterMove(state, state.sideToMove);
+  burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
 
-  postMoveHazardsAndTurnAdvance(state);
+
+ postMoveHazardsAndTurnAdvance(state, mover.side);
 }
 
 export function mkMove(from: Square, to: Square): Move {
