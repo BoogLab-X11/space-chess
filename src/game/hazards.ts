@@ -31,6 +31,19 @@ function newHazardId() {
  *
  * Adjust probabilities/lanes later.
  */
+// How many columns from each edge hazards can spawn in.
+// 4 => A–D and (for 20 cols) Q–T
+// 5 => A–E and (for 20 cols) P–T
+const EDGE_BAND_DEPTH = 4;
+
+function pickEdgeBandColumn(state: GameState, rng: () => number): number {
+  const d = Math.max(1, Math.min(EDGE_BAND_DEPTH, Math.floor(state.cols / 2)));
+  const off = randInt(rng, 0, d - 1);
+  const fromLeft = rng() < 0.5;
+  return fromLeft ? off : (state.cols - d + off);
+}
+
+
 export function maybeSpawnHazards(state: GameState): void {
   const rng = mulberry32(state.rngSeed);
   // advance seed for next time
@@ -40,9 +53,9 @@ export function maybeSpawnHazards(state: GameState): void {
   const beltTop = 2;
   const beltBottom = 7;
 
-  // “Edge columns” for vertical hazards: choose far columns (0 and cols-1)
-  const leftEdgeCol = 0;
-  const rightEdgeCol = state.cols - 1;
+    // “Edge columns” for vertical hazards: choose within an edge band
+  // (A–D and Q–T when EDGE_BAND_DEPTH=4 on a 20-col board)
+
 
   // Tune these:
   const spawnChanceHoriz = 0.35; // per hazard tick
@@ -54,7 +67,7 @@ export function maybeSpawnHazards(state: GameState): void {
 
     const hz: FlyingHazard = {
       id: newHazardId(),
-      pos: { r: row, c: fromLeft ? 0 : state.cols - 1 },
+      pos: { r: row, c: fromLeft ? randInt(rng, 0, Math.min(EDGE_BAND_DEPTH, state.cols - 1)) : randInt(rng, Math.max(0, state.cols - EDGE_BAND_DEPTH), state.cols - 1) },
       dir: fromLeft ? "E" : "W",
       alive: true,
     };
@@ -74,7 +87,7 @@ export function maybeSpawnHazards(state: GameState): void {
   }
 
   if (rng() < spawnChanceVert) {
-    const col = rng() < 0.5 ? leftEdgeCol : rightEdgeCol;
+        const col = pickEdgeBandColumn(state, rng);
     const fromTop = rng() < 0.5;
 
     const hz: FlyingHazard = {

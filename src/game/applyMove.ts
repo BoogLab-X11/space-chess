@@ -30,6 +30,7 @@ function burnOverheatedPiecesIfStillAdjacentToStar(
 }
 
 
+
 function other(side: "W" | "B"): "W" | "B" {
   return side === "W" ? "B" : "W";
 }
