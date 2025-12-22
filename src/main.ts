@@ -51,6 +51,8 @@ resizeCanvasToDisplaySize();
 const ROWS = 10;
 const COLS = 20;
 let state: GameState = createInitialState(ROWS, COLS, 42);
+const AI_THINK_MS = 500; // tweak this
+
 
 // --- Board layout ---
 const OUTER_MARGIN = 40;
@@ -234,11 +236,19 @@ function resetGame(seed = 42) {
   selected = null;
   legal = [];
   gameOver = null;
+
+  lastBlackMoveTo = null;
+  aiThinking = false;
+  aiToken = 0;
 }
+
 
 // --- Input state ---
 let selected: Square | null = null;
 let legal: Square[] = [];
+let lastBlackMoveTo: Square | null = null;
+let aiThinking = false;
+let aiToken = 0;
 
 type Explosion = {
   sq: Square;        // board square where it happened
@@ -394,16 +404,44 @@ function chooseBlackMove(state: GameState): CandidateMove | null {
 function runBlackAIIfNeeded() {
   if (gameOver) return;
   if (state.sideToMove !== "B") return;
+  if (aiThinking) return;
 
-  const m = chooseBlackMove(state);
-  if (!m) return;
+  aiThinking = true;
+  const myToken = ++aiToken;
 
-  // clear any selection UI
-  selected = null;
-  legal = [];
+  window.setTimeout(() => {
+    // If something changed while "thinking" (reset, game over, not black's turn), abort.
+    if (myToken !== aiToken) { aiThinking = false; return; }
+    if (gameOver) { aiThinking = false; return; }
+    if (state.sideToMove !== "B") { aiThinking = false; return; }
 
-  applyMove(state, mkMove(m.from, m.to));
+    const m = chooseBlackMove(state);
+    if (!m) {
+      aiThinking = false;
+      return;
+    }
+
+    // Mark last black destination square for UI
+    lastBlackMoveTo = { r: m.to.r, c: m.to.c };
+
+    // clear any selection UI
+    selected = null;
+    legal = [];
+
+    // Apply the AI move (hazards tick inside applyMove after the move)
+    // (Your explosion-diff code should remain around this call, if you added it.)
+    applyMove(state, mkMove(m.from, m.to));
+
+    // Check win after Black's move
+    const win = winnerIfAny(state);
+    if (win) {
+      gameOver = { winner: win };
+    }
+
+    aiThinking = false;
+  }, AI_THINK_MS);
 }
+
 
 canvas.addEventListener("click", (ev) => {
   const rect = canvas.getBoundingClientRect();
@@ -487,12 +525,7 @@ for (const p of state.pieces) {
   // Black AI responds (if it's now Black's turn)
   runBlackAIIfNeeded();
 
-  // Check win after Black's response
-  win = winnerIfAny(state);
-  if (win) {
-    gameOver = { winner: win };
-    return;
-  }
+ 
 
 });
 
@@ -783,6 +816,19 @@ function draw(state: GameState) {
       tileSize - 4
     );
   }
+
+  // Last black move indicator (destination square)
+  if (lastBlackMoveTo) {
+    ctx.strokeStyle = "#e53e3e";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(
+      x0 + lastBlackMoveTo.c * tileSize + 2,
+      y0 + lastBlackMoveTo.r * tileSize + 2,
+      tileSize - 4,
+      tileSize - 4
+    );
+  }
+
 
   // HUD
   ctx.textAlign = "left";
