@@ -1,5 +1,5 @@
 import { createInitialState } from "./game/setup";
-import { applyMove, mkMove } from "./game/applyMove";
+import { applyMove, applyDeploy, mkMove } from "./game/applyMove";
 import type { GameState, Square } from "./game/types";
 import { pieceAt, staticAt, flyerAt } from "./game/indexes";
 
@@ -52,6 +52,60 @@ const ROWS = 10;
 const COLS = 20;
 let state: GameState = createInitialState(ROWS, COLS, Date.now());
 const AI_THINK_MS = 900; // tweak this
+
+// --- Manufacturing / Deploy UI (v0) ---
+let deployOpen = false;
+
+// What can we deploy (v0: single ship)?
+const DEPLOY_TYPE: "P" = "P";
+const DEPLOY_COST = 3; // tweak: asteroid gives +1, so 3 is a meaningful spend
+
+// Helper: home row for deployment (rank 1 for White, rank 10 for Black)
+function deployHomeRowFor(side: "W" | "B"): number {
+  return side === "W" ? ROWS - 1 : 0;
+}
+
+function canDeployNow(s: GameState): boolean {
+  const side = s.sideToMove;
+  return s.manufacturing[side] >= DEPLOY_COST && !gameOver;
+}
+
+// UI rects (computed from current viewport)
+type Rect = { x: number; y: number; w: number; h: number };
+
+function pointInRect(px: number, py: number, r: Rect): boolean {
+  return px >= r.x && py >= r.y && px < r.x + r.w && py < r.y + r.h;
+}
+
+function getUiRects(viewW: number, viewH: number) {
+  const { x0, y0, boardW, boardH } = computeBoardLayout(viewW, viewH);
+
+  // Factories sit to the right of the board
+  const pad = 18;
+  const size = 56;
+
+  const fx = x0 + boardW + pad;
+
+  // Black at top-right of the board area
+  const factoryB: Rect = { x: fx, y: y0, w: size, h: size };
+
+  // White at bottom-right of the board area
+  const factoryW: Rect = { x: fx, y: y0 + boardH - size, w: size, h: size };
+
+  // Deploy panel (centered-ish)
+  const panelW = 420;
+  const panelH = 220;
+  const panel: Rect = {
+    x: Math.floor((viewW - panelW) / 2),
+    y: Math.floor((viewH - panelH) / 2),
+    w: panelW,
+    h: panelH,
+  };
+
+  return { factoryB, factoryW, panel };
+}
+
+
 
 
 // --- Board layout ---
@@ -453,15 +507,106 @@ canvas.addEventListener("click", (ev) => {
   const rect = canvas.getBoundingClientRect();
   const x = ev.clientX - rect.left;
   const y = ev.clientY - rect.top;
-  const aliveBefore = new Set(
-  state.pieces.filter(p => p.alive).map(p => p.id)
-);
 
+  // UI hit-testing uses viewport units
+  const viewW = rect.width;
+  const viewH = rect.height;
+    const { factoryB, factoryW, panel } = getUiRects(viewW, viewH);
 
-  const sq = screenToSquare(x, y);
+  // If game over, ignore input
   if (gameOver) return;
 
+  // Factory click opens deploy UI
+  // (White-only deploy still enforced elsewhere; black factory just does nothing for now)
+  if (pointInRect(x, y, factoryW) || pointInRect(x, y, factoryB)) {
+    if (state.sideToMove === "W") {
+      deployOpen = !deployOpen;
+      selected = null;
+      legal = [];
+    }
+    return;
+  }
+
+
+  // If deploy panel is open, clicks behave differently
+  if (deployOpen) {
+    // Clicking inside the panel just interacts with UI (no board clicks)
+    if (pointInRect(x, y, panel)) {
+      return;
+    }
+
+    // Clicking outside the panel: treat it as "attempt deploy on clicked square",
+    // otherwise close the panel.
+    const sq = screenToSquare(x, y);
+    if (!sq) {
+      deployOpen = false;
+      return;
+    }
+
+    // Only White deploys for now
+    if (state.sideToMove !== "W") {
+      deployOpen = false;
+      return;
+    }
+
+    // Must be on White home rank (rank 1 => internal row ROWS-1)
+    const homeRow = deployHomeRowFor("W");
+    if (sq.r !== homeRow) {
+      deployOpen = false;
+      return;
+    }
+
+    // Snapshot for explosion detection
+    const aliveBefore = new Set(
+      state.pieces.filter(p => p.alive).map(p => p.id)
+    );
+
+    // Attempt deploy (consumes turn if it succeeds)
+    applyDeploy(state, sq, DEPLOY_TYPE, DEPLOY_COST);
+
+    // If turn advanced, deployment succeeded. (applyDeploy always advances on success.)
+    // We'll detect success by checking if sideToMove flipped away from W.
+    const deployed = (state.sideToMove !== "W");
+
+    if (deployed) {
+      // Clear any selection UI
+      selected = null;
+      legal = [];
+      deployOpen = false;
+
+      // Explosions: anything that died during deploy (star burn, hazard tick if Black was mover, etc.)
+      for (const p of state.pieces) {
+        if (aliveBefore.has(p.id) && !p.alive) {
+          spawnExplosion(p.pos);
+        }
+      }
+
+      // Win check (deploy can cause star-burn deaths)
+      const win = winnerIfAny(state);
+      if (win) {
+        gameOver = { winner: win };
+        return;
+      }
+
+      // If it's now Black's turn, let AI respond
+      runBlackAIIfNeeded();
+      return;
+    }
+
+    // Deploy failed (invalid target, not enough points, occupied, hazard, etc.)
+    // Close panel for simplicity.
+    deployOpen = false;
+    return;
+  }
+
+
+  const aliveBefore = new Set(
+    state.pieces.filter(p => p.alive).map(p => p.id)
+  );
+
+  const sq = screenToSquare(x, y);
   if (!sq) return;
+
 
   if (!selected) {
   const p = pieceAt(state, sq);
@@ -617,6 +762,24 @@ function draw(state: GameState) {
       ctx.fillRect(x0 + sq.c * tileSize, y0 + sq.r * tileSize, tileSize, tileSize);
     }
   }
+
+  // Deploy target highlight (White only, when deploy panel is open)
+  if (deployOpen && state.sideToMove === "W" && canDeployNow(state)) {
+    const homeRow = deployHomeRowFor("W");
+    ctx.fillStyle = "rgba(66, 153, 225, 0.20)"; // subtle blue
+
+    for (let c = 0; c < COLS; c++) {
+      const sq = { r: homeRow, c };
+      // Only highlight squares that are actually deployable
+      if (pieceAt(state, sq)) continue;
+      if (staticAt(state, sq)) continue;
+      const hz = flyerAt(state, sq);
+      if (hz && hz.alive) continue;
+
+      ctx.fillRect(x0 + c * tileSize, y0 + homeRow * tileSize, tileSize, tileSize);
+    }
+  }
+
 
   // Border
   ctx.lineWidth = BORDER;
@@ -838,15 +1001,98 @@ function draw(state: GameState) {
   }
 
 
-  // HUD
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.font = "16px system-ui, sans-serif";
-  ctx.fillText(`Side to move: ${state.sideToMove} | ply=${state.ply}`, 16, 26);
-  // ctx.fillText(`Rooks obey rook rules; other pieces teleport (for now).`, 16, 48);
+   // Factories (manufacturing) + Deploy panel UI
+  const { factoryB, factoryW, panel } = getUiRects(viewW, viewH);
 
-    if (gameOver) {
+  function drawFactory(rect: { x: number; y: number; w: number; h: number }, points: number, active: boolean) {
+    ctx.save();
+
+    // background
+    ctx.globalAlpha = active ? 1 : 0.55;
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+
+    // border
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+
+    // icon
+    ctx.globalAlpha = active ? 1 : 0.45;
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🏭", rect.x + rect.w / 2, rect.y + rect.h * 0.40);
+
+    // number (no labels)
+    ctx.font = "16px system-ui, sans-serif";
+    ctx.fillText(String(points), rect.x + rect.w / 2, rect.y + rect.h * 0.78);
+
+    ctx.restore();
+  }
+
+  // Black (top) / White (bottom)
+  // "Active" glow is just: whose turn it is (and only White can deploy for now)
+  drawFactory(factoryB, state.manufacturing.B, state.sideToMove === "B");
+  drawFactory(factoryW, state.manufacturing.W, state.sideToMove === "W");
+
+  // Deploy panel overlay
+  if (deployOpen) {
+    ctx.save();
+
+    // Dim the board
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    // Panel box
+    ctx.fillStyle = "rgba(20,24,32,0.92)";
+    ctx.fillRect(panel.x, panel.y, panel.w, panel.h);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(panel.x, panel.y, panel.w, panel.h);
+
+    // Panel text
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = "18px system-ui, sans-serif";
+    ctx.fillText("Deploy Ship", panel.x + 16, panel.y + 14);
+
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillText(`Cost: ${DEPLOY_COST} 🏭`, panel.x + 16, panel.y + 48);
+    ctx.fillText(`Type: ${DEPLOY_TYPE}`, panel.x + 16, panel.y + 70);
+
+    const side = state.sideToMove;
+    const mp = state.manufacturing[side];
+    const need = Math.max(0, DEPLOY_COST - mp);
+
+    if (!canDeployNow(state)) {
+      ctx.fillStyle = "rgba(255,120,120,0.95)";
+      ctx.fillText(
+        side !== "W"
+          ? "Deploy UI is White-only (for now)."
+          : `Not enough manufacturing: need ${need} more.`,
+        panel.x + 16,
+        panel.y + 110
+      );
+    } else {
+      ctx.fillStyle = "rgba(200,255,200,0.95)";
+      ctx.fillText("Click a square on rank 1 to deploy.", panel.x + 16, panel.y + 110);
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.fillText("Click outside this panel to close.", panel.x + 16, panel.y + panel.h - 34);
+
+    ctx.restore();
+  }
+
+    // --- Game Over overlay (wins + reset hint) ---
+  if (gameOver) {
+    ctx.save();
+
     ctx.fillStyle = "rgba(0,0,0,0.65)";
     ctx.fillRect(0, 0, viewW, viewH);
 
@@ -854,11 +1100,18 @@ function draw(state: GameState) {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "48px system-ui, sans-serif";
-    ctx.fillText(`${gameOver.winner === "W" ? "White" : "Black"} wins`, viewW / 2, viewH / 2 - 20);
+    ctx.fillText(
+      `${gameOver.winner === "W" ? "White" : "Black"} wins`,
+      viewW / 2,
+      viewH / 2 - 20
+    );
 
     ctx.font = "18px system-ui, sans-serif";
     ctx.fillText(`Press R to restart`, viewW / 2, viewH / 2 + 30);
+
+    ctx.restore();
   }
+
 }
 
 function loop() {

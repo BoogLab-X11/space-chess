@@ -1,4 +1,4 @@
-import type { GameState, Move, Square } from "./types";
+import type { GameState, Move, Square, PieceType } from "./types";
 import { inBounds } from "./geom";
 import { pieceAt, staticAt, flyerAt } from "./indexes";
 import { markHeatAfterMove } from "./starHeat";
@@ -7,6 +7,18 @@ import { hazardTick, maybeSpawnHazards } from "./hazards";
 function isAdjacent(a: Square, b: Square): boolean {
   return Math.abs(a.r - b.r) <= 1 && Math.abs(a.c - b.c) <= 1 && !(a.r === b.r && a.c === b.c);
 }
+
+function other(side: "W" | "B"): "W" | "B" {
+  return side === "W" ? "B" : "W";
+}
+
+// Simple unique id for deployed ships
+let deployPieceCounter = 0;
+function newDeployedPieceId(side: "W" | "B", type: PieceType) {
+  deployPieceCounter += 1;
+  return `${side}${type}_d${deployPieceCounter}`;
+}
+
 
 function burnOverheatedPiecesIfStillAdjacentToStar(
   state: GameState,
@@ -31,9 +43,9 @@ function burnOverheatedPiecesIfStillAdjacentToStar(
 
 
 
-function other(side: "W" | "B"): "W" | "B" {
-  return side === "W" ? "B" : "W";
-}
+//function other(side: "W" | "B"): "W" | "B" {
+//  return side === "W" ? "B" : "W";
+//}
 
 function pathClearForSlide(state: GameState, from: Square, to: Square, dr: number, dc: number): boolean {
   let r = from.r + dr;
@@ -279,3 +291,66 @@ export function applyMove(state: GameState, move: Move): void {
 export function mkMove(from: Square, to: Square): Move {
   return { from, to };
 }
+
+/**
+ * Deploy a new ship, consuming the turn.
+ * Rules (v0):
+ * - Must deploy on an empty square
+ * - Cannot deploy onto static hazards
+ * - Cannot deploy onto any flying object (comet/asteroid)
+ * - Spends manufacturing points
+ * - Counts as the mover's action for star burn enforcement + heat marking
+ * - Advances turn in the same way as a normal move (including hazard tick after Black)
+ */
+export function applyDeploy(
+  state: GameState,
+  to: Square,
+  type: PieceType,
+  cost: number
+): void {
+  const side = state.sideToMove;
+
+  // Record who was heated at turn start (same logic as applyMove)
+  const overheatedIdsAtTurnStart = new Set(
+    state.pieces.filter(p => p.alive && p.side === side && p.heated).map(p => p.id)
+  );
+
+  // Basic resource check
+  if (state.manufacturing[side] < cost) return;
+
+  // Must be in bounds
+  if (!inBounds(to, state.rows, state.cols)) return;
+
+  // Must be empty of pieces
+  if (pieceAt(state, to)) return;
+
+  // Must not be a static hazard
+  if (staticAt(state, to)) return;
+
+  // Must not be a flying object (comet or asteroid)
+  const hz = flyerAt(state, to);
+  if (hz && hz.alive) return;
+
+  // Spend
+  state.manufacturing[side] -= cost;
+
+  // Create piece
+  state.pieces.push({
+    id: newDeployedPieceId(side, type),
+    side,
+    type,
+    pos: { ...to },
+    alive: true,
+    heated: false,
+  });
+
+  // Heat marking after "action" (same as applyMove’s normal path)
+  markHeatAfterMove(state, side);
+
+  // Burn any pieces that were heated at start and ended still adjacent to star
+  burnOverheatedPiecesIfStillAdjacentToStar(state, side, overheatedIdsAtTurnStart);
+
+  // Finish the turn exactly like a move does
+  postMoveHazardsAndTurnAdvance(state, side);
+}
+
