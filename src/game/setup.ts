@@ -48,29 +48,48 @@ export function createInitialState(rows: number, cols: number, seed = 123456): G
   // --- Static hazards placement rules ---
   const rng = mulberry32(seed >>> 0);
 
-  // Hazard belt is 6 deep, and must NOT touch starting zones.
-  // With 10 ranks, that belt is ranks 3..8 inclusive (6 ranks).
-  // Star must be confined to a 4-deep *central* belt to avoid adjacency risk to home areas:
-  // that is ranks 4..7 inclusive (4 ranks).
-  const hazardBeltRankMin = 3;
-  const hazardBeltRankMax = 8;
+    // --- Tuning knobs ---
+  const NUM_PLANETS = 3;
 
-  const starBeltRankMin = 4;
-  const starBeltRankMax = 7;
+  // Central hazard belts (board notation ranks)
+  // Hazard belt is 6 deep: ranks 3..8 (inclusive)
+  const hazardBeltRankMin = 4;
+  const hazardBeltRankMax = 7;
 
-  const minC = 0;
-  const maxC = cols - 1;
+  // Star belt is 4 deep: ranks 4..7 (inclusive)
+  const starBeltRankMin = 5;
+  const starBeltRankMax = 6;
+
+  // Column confinement (internal columns: A=0 ... )
+  // Example: cols=20 => 0..19. Constrain hazards to the centre.
+  const hazardBeltColMin = 4;
+  const hazardBeltColMax = 16;
+
+  // Star can be even more central than planets if you like
+  const starBeltColMin = 9;
+  const starBeltColMax = 10;
+
 
   const occupied = new Set<string>();
   for (const p of pieces) occupied.add(sqKey(p.pos));
 
   const statics: StaticHazard[] = [];
 
-  function placeOne(kind: "planet" | "star", rankMin: number, rankMax: number) {
+   function placeOne(
+    kind: "planet" | "star",
+    rankMin: number,
+    rankMax: number,
+    colMin: number,
+    colMax: number
+  ) {
+    // clamp cols to board
+    const cMin = Math.max(0, colMin);
+    const cMax = Math.min(cols - 1, colMax);
+
     for (let tries = 0; tries < 1000; tries++) {
       const rank = randInt(rng, rankMin, rankMax);
       const r = rFromRank(rank, rows);
-      const c = randInt(rng, minC, maxC);
+      const c = randInt(rng, cMin, cMax);
       const key = `${r},${c}`;
       if (occupied.has(key)) continue;
       occupied.add(key);
@@ -80,13 +99,14 @@ export function createInitialState(rows: number, cols: number, seed = 123456): G
     throw new Error(`Failed to place ${kind}`);
   }
 
-  // 3 planets anywhere in the 6-deep belt (ranks 3..8)
-  placeOne("planet", hazardBeltRankMin, hazardBeltRankMax);
-  placeOne("planet", hazardBeltRankMin, hazardBeltRankMax);
-  placeOne("planet", hazardBeltRankMin, hazardBeltRankMax);
 
-  // 1 star in the 4-deep central belt (ranks 4..7)
-  placeOne("star", starBeltRankMin, starBeltRankMax);
+   // Planets
+  for (let i = 0; i < NUM_PLANETS; i++) {
+    placeOne("planet", hazardBeltRankMin, hazardBeltRankMax, hazardBeltColMin, hazardBeltColMax);
+  }
+
+  // Star
+  placeOne("star", starBeltRankMin, starBeltRankMax, starBeltColMin, starBeltColMax);
 
   return {
     rows,
