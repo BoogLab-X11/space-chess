@@ -19,6 +19,16 @@ const FILES = "ABCDEFGHIJKLMNOPQRST";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app not found");
 
+// Kill browser scrollbars / default margins so the canvas always fits the viewport
+document.documentElement.style.margin = "0";
+document.documentElement.style.padding = "0";
+document.documentElement.style.overflow = "hidden";
+
+document.body.style.margin = "0";
+document.body.style.padding = "0";
+document.body.style.overflow = "hidden";
+
+
 app.style.margin = "0";
 app.style.width = "100vw";
 app.style.height = "100vh";
@@ -99,7 +109,7 @@ function getUiRects(viewW: number, viewH: number) {
   const { x0, y0, boardW, boardH } = computeBoardLayout(viewW, viewH);
 
   // Factories sit to the right of the board
-  const pad = 18;
+  const pad = 13;
   const size = 56;
 
   const fx = x0 + boardW + pad;
@@ -158,19 +168,29 @@ function shipLabel(t: "P" | "N" | "B" | "R" | "Q"): string {
 
 
 // --- Board layout ---
+// --- Board layout ---
 const OUTER_MARGIN = 40;
 const BORDER = 3;
 
+// Reserve space on the right for factories/panel UI so it never goes off-screen.
+const UI_GUTTER_RIGHT = 30; // tweak if you change factory size/padding
+
 function computeBoardLayout(viewW: number, viewH: number) {
-  const usableW = Math.max(0, viewW - OUTER_MARGIN * 2);
+  const usableW = Math.max(0, viewW - OUTER_MARGIN * 2 - UI_GUTTER_RIGHT);
   const usableH = Math.max(0, viewH - OUTER_MARGIN * 2);
+
   const tileSize = Math.floor(Math.min(usableW / COLS, usableH / ROWS));
   const boardW = tileSize * COLS;
   const boardH = tileSize * ROWS;
-  const x0 = Math.floor((viewW - boardW) / 2);
+
+  // Center the board within the remaining usable area (leaving gutter on the right)
+  const contentW = boardW + UI_GUTTER_RIGHT;
+  const x0 = Math.floor((viewW - contentW) / 2);
   const y0 = Math.floor((viewH - boardH) / 2);
+
   return { x0, y0, tileSize, boardW, boardH };
 }
+
 
 function screenToSquare(x: number, y: number): Square | null {
   const rect = canvas.getBoundingClientRect();
@@ -364,10 +384,13 @@ const explosions: Explosion[] = [];
 
 
 // --------------------
-// Black AI (v1)
+// Black AI (v2: deploy + manufacturing-aware)
 // --------------------
 
 type CandidateMove = { from: Square; to: Square };
+type CandidateAction =
+  | { kind: "move"; from: Square; to: Square }
+  | { kind: "deploy"; to: Square; type: "P" | "N" | "B" | "R" | "Q"; cost: number };
 
 function cloneState(s: GameState): GameState {
   return {
@@ -377,7 +400,6 @@ function cloneState(s: GameState): GameState {
     ply: s.ply,
     rngSeed: s.rngSeed,
     manufacturing: { W: s.manufacturing.W, B: s.manufacturing.B },
-
 
     pieces: s.pieces.map(p => ({
       id: p.id,
@@ -394,13 +416,12 @@ function cloneState(s: GameState): GameState {
     })),
 
     flyers: s.flyers.map(hz => ({
-  id: hz.id,
-  kind: hz.kind,
-  pos: { r: hz.pos.r, c: hz.pos.c },
-  dir: hz.dir,
-  alive: hz.alive,
-})),
-
+      id: hz.id,
+      kind: hz.kind,
+      pos: { r: hz.pos.r, c: hz.pos.c },
+      dir: hz.dir,
+      alive: hz.alive,
+    })),
   };
 }
 
@@ -430,6 +451,8 @@ function evaluateForBlack(state: GameState): number {
   if (!bAlive && !wAlive) return 0;
 
   let score = 0;
+
+  // Material
   for (const p of state.pieces) {
     if (!p.alive) continue;
     const v = pieceValueLocal(p.type);
@@ -443,14 +466,14 @@ function evaluateForBlack(state: GameState): number {
     if (p.side === "W" && p.heated) score += 0.25;
   }
 
+  // Manufacturing advantage matters a bit (small weight)
+  score += 0.30 * (state.manufacturing.B - state.manufacturing.W);
+
   return score;
 }
 
 function legalMovesForBlack(state: GameState): CandidateMove[] {
-  // IMPORTANT: this generator assumes it's Black to move
-  // because your helper functions treat state.sideToMove as "friendly".
   if (state.sideToMove !== "B") return [];
-
   const moves: CandidateMove[] = [];
 
   for (const p of state.pieces) {
@@ -487,22 +510,93 @@ function legalMovesForBlack(state: GameState): CandidateMove[] {
   return moves;
 }
 
-function chooseBlackMove(state: GameState): CandidateMove | null {
+function deploySquaresForBlack(state: GameState): Square[] {
+  // Black home rank = rank 10 => internal row 0
+  const r = 0;
+  const out: Square[] = [];
+  for (let c = 0; c < COLS; c++) {
+    const sq = { r, c };
+    if (pieceAt(state, sq)) continue;
+    if (staticAt(state, sq)) continue;
+    const hz = flyerAt(state, sq);
+    if (hz && hz.alive) continue;
+    out.push(sq);
+  }
+  return out;
+}
+
+function pickDeployTypesFor(mp: number): Array<"Q" | "R" | "N" | "B" | "P"> {
+  // Prefer strongest affordable first
+  const order: Array<"Q" | "R" | "N" | "B" | "P"> = ["Q", "R", "N", "B", "P"];
+  return order.filter(t => mp >= DEPLOY_COSTS[t]);
+}
+
+function preferredDeploySquares(state: GameState, squares: Square[]): Square[] {
+  // Prefer near Black's starting file "G" (A=0 => G=6)
+  const g = 6;
+
+  // Also gently prefer towards board center (COLS/2)
+  const mid = (COLS - 1) / 2;
+
+  return [...squares].sort((a, b) => {
+    const da = Math.abs(a.c - g) + 0.25 * Math.abs(a.c - mid);
+    const db = Math.abs(b.c - g) + 0.25 * Math.abs(b.c - mid);
+    return da - db;
+  });
+}
+
+function legalActionsForBlack(state: GameState): CandidateAction[] {
+  if (state.sideToMove !== "B") return [];
+
+  const actions: CandidateAction[] = [];
+
+  // Normal moves
+  for (const m of legalMovesForBlack(state)) {
+    actions.push({ kind: "move", from: m.from, to: m.to });
+  }
+
+  // Deploy (if affordable)
+  const mp = state.manufacturing.B;
+  const types = pickDeployTypesFor(mp);
+  if (types.length > 0) {
+    const squares = preferredDeploySquares(state, deploySquaresForBlack(state));
+    // Keep this bounded so we don't simulate too many.
+    // We'll consider up to 8 best squares per type.
+    const bestSquares = squares.slice(0, 8);
+
+    for (const t of types) {
+      const cost = DEPLOY_COSTS[t];
+      for (const sq of bestSquares) {
+        actions.push({ kind: "deploy", to: sq, type: t, cost });
+      }
+    }
+  }
+
+  return actions;
+}
+
+function chooseBlackAction(state: GameState): CandidateAction | null {
   if (state.sideToMove !== "B") return null;
 
-  const candidates = legalMovesForBlack(state);
+  const candidates = legalActionsForBlack(state);
   if (candidates.length === 0) return null;
 
-  let best: CandidateMove | null = null;
+  let best: CandidateAction | null = null;
   let bestScore = -Infinity;
 
-  for (const m of candidates) {
+  for (const a of candidates) {
     const sim = cloneState(state);
-    applyMove(sim, mkMove(m.from, m.to)); // includes hazards + star burn
+
+    if (a.kind === "move") {
+      applyMove(sim, mkMove(a.from, a.to));
+    } else {
+      applyDeploy(sim, a.to, a.type, a.cost);
+    }
+
     const score = evaluateForBlack(sim);
     if (score > bestScore) {
       bestScore = score;
-      best = m;
+      best = a;
     }
   }
 
@@ -522,34 +616,41 @@ function runBlackAIIfNeeded() {
     if (gameOver) { aiThinking = false; return; }
     if (state.sideToMove !== "B") { aiThinking = false; return; }
 
-    const m = chooseBlackMove(state);
-    if (!m) { aiThinking = false; return; }
+    const a = chooseBlackAction(state);
+    if (!a) { aiThinking = false; return; }
 
-    // Marker for UI: where Black moved to
-    lastBlackMoveTo = { r: m.to.r, c: m.to.c };
+    // Marker for UI: where Black acted (move-to or deploy square)
+    lastBlackMoveTo = a.kind === "move"
+      ? { r: a.to.r, c: a.to.c }
+      : { r: a.to.r, c: a.to.c };
 
-    // Explosions: snapshot before applying the move
+    // Explosions: snapshot before applying the action
     const aliveBefore = new Set(
       state.pieces.filter(p => p.alive).map(p => p.id)
     );
 
-    // Apply move (hazards tick inside applyMove AFTER the move)
-    applyMove(state, mkMove(m.from, m.to));
+    // Apply action
+    if (a.kind === "move") {
+      applyMove(state, mkMove(a.from, a.to));
+    } else {
+      applyDeploy(state, a.to, a.type, a.cost);
+    }
 
-    // Explosions: detect deaths caused by the move OR hazard tick OR star burn
+    // Explosions: detect deaths caused by the action OR hazard tick OR star burn
     for (const p of state.pieces) {
       if (aliveBefore.has(p.id) && !p.alive) {
         spawnExplosion(p.pos);
       }
     }
 
-    // Win check after Black's move
+    // Win check after Black's action
     const win = winnerIfAny(state);
     if (win) gameOver = { winner: win };
 
     aiThinking = false;
   }, AI_THINK_MS);
 }
+
 
 
 canvas.addEventListener("click", (ev) => {
