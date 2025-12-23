@@ -205,6 +205,16 @@ function screenToSquare(x: number, y: number): Square | null {
   return { r, c };
 }
 
+function nextSquareForDir(pos: Square, dir: "N" | "S" | "E" | "W"): Square {
+  switch (dir) {
+    case "E": return { r: pos.r, c: pos.c + 1 };
+    case "W": return { r: pos.r, c: pos.c - 1 };
+    case "N": return { r: pos.r - 1, c: pos.c };
+    case "S": return { r: pos.r + 1, c: pos.c };
+  }
+}
+
+
 function slideLegalDests(state: GameState, from: Square, dirs: Array<{ dr: number; dc: number }>): Square[] {
   const out: Square[] = [];
 
@@ -360,6 +370,10 @@ function resetGame(seed = Date.now()) {
   legal = [];
   gameOver = null;
 
+    lastBlackMoveFrom = null;
+  lastBlackMoveTo = null;
+  hazardTrails.length = 0;
+
   lastBlackMoveTo = null;
   aiThinking = false;
   aiToken = 0;
@@ -370,9 +384,25 @@ function resetGame(seed = Date.now()) {
 // --- Input state ---
 let selected: Square | null = null;
 let legal: Square[] = [];
+
+// Last Black move highlights
+let lastBlackMoveFrom: Square | null = null;
 let lastBlackMoveTo: Square | null = null;
+
+type HazardTrail = {
+  from: Square;
+  to: Square;
+  kind: "comet" | "asteroid";
+  t0: number;
+  ttl: number;
+};
+
+
+const hazardTrails: HazardTrail[] = [];
+
 let aiThinking = false;
 let aiToken = 0;
+
 
 type Explosion = {
   sq: Square;        // board square where it happened
@@ -624,17 +654,73 @@ function runBlackAIIfNeeded() {
       ? { r: a.to.r, c: a.to.c }
       : { r: a.to.r, c: a.to.c };
 
-    // Explosions: snapshot before applying the action
+        // Explosions: snapshot before applying the action
     const aliveBefore = new Set(
       state.pieces.filter(p => p.alive).map(p => p.id)
     );
 
+    // Flyer snapshot (so we can draw a "hazard step trail" after Black acts)
+    const flyersBefore = state.flyers.map(hz => ({
+  id: hz.id,
+  kind: hz.kind,
+  pos: { r: hz.pos.r, c: hz.pos.c },
+  dir: hz.dir,
+  alive: hz.alive,
+}));
+
+
     // Apply action
     if (a.kind === "move") {
+      // Remember Black move squares (for highlight)
+      lastBlackMoveFrom = { r: a.from.r, c: a.from.c };
+      lastBlackMoveTo = { r: a.to.r, c: a.to.c };
+
       applyMove(state, mkMove(a.from, a.to));
     } else {
+      // Deploy: treat as "from==to" highlight
+      lastBlackMoveFrom = { r: a.to.r, c: a.to.c };
+      lastBlackMoveTo = { r: a.to.r, c: a.to.c };
+
       applyDeploy(state, a.to, a.type, a.cost);
     }
+
+    // Build hazard trails (hazards tick happens after Black acts)
+    // We show where each flyer moved for this hazard phase, briefly.
+    const afterById = new Map(state.flyers.map(hz => [hz.id, { r: hz.pos.r, c: hz.pos.c }]));
+    const nowT = performance.now();
+
+    for (const fb of flyersBefore) {
+      if (!fb.alive) continue;
+
+      const afterPos = afterById.get(fb.id);
+
+      if (afterPos) {
+        // still alive: show movement if it moved
+        if (afterPos.r !== fb.pos.r || afterPos.c !== fb.pos.c) {
+          hazardTrails.push({
+  from: { ...fb.pos },
+  to: { ...afterPos },
+  kind: fb.kind,
+  t0: nowT,
+  ttl: 3000,
+});
+
+        }
+      } else {
+        // disappeared this tick (off-board / hit static / hit piece / etc.)
+        // Show a 1-step trail in its direction to indicate likely impact square.
+        const to = nextSquareForDir(fb.pos, fb.dir);
+       hazardTrails.push({
+  from: { ...fb.pos },
+  to,
+  kind: fb.kind,
+  t0: nowT,
+  ttl: 3000,
+});
+
+      }
+    }
+
 
     // Explosions: detect deaths caused by the action OR hazard tick OR star burn
     for (const p of state.pieces) {
@@ -935,6 +1021,34 @@ function draw(state: GameState) {
     }
   }
 
+    // Hazard trails (short-lived, shows last hazard tick step)
+  const nowTrail = performance.now();
+  for (let i = hazardTrails.length - 1; i >= 0; i--) {
+    const t = hazardTrails[i];
+    const age = nowTrail - t.t0;
+    if (age >= t.ttl) {
+      hazardTrails.splice(i, 1);
+      continue;
+    }
+
+    const k = 1 - age / t.ttl;
+
+    ctx.save();
+    ctx.globalAlpha = 0.45 * k;
+    ctx.fillStyle =
+  t.kind === "comet"
+    ? "rgba(255, 110, 40, 1)"   // hot orange for comets
+    : "rgba(180, 190, 205, 1)"; // cool grey for asteroids
+
+    // draw the from and to squares as soft overlays
+    ctx.fillRect(x0 + t.from.c * tileSize, y0 + t.from.r * tileSize, tileSize, tileSize);
+    ctx.globalAlpha = 0.60 * k;
+    ctx.fillRect(x0 + t.to.c * tileSize, y0 + t.to.r * tileSize, tileSize, tileSize);
+
+    ctx.restore();
+  }
+
+
   // Deploy target highlight (White only, when deploy panel is open)
   if (deployOpen && state.sideToMove === "W" && canDeployNow(state)) {
     const homeRow = deployHomeRowFor("W");
@@ -1160,17 +1274,21 @@ function draw(state: GameState) {
     );
   }
 
-  // Last black move indicator (destination square)
-  if (lastBlackMoveTo) {
-    ctx.strokeStyle = "#e53e3e";
-    ctx.lineWidth = 4;
+    // Last Black move highlight (from + to)
+  function strokeSquare(sq: Square, stroke: string, w: number) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = w;
     ctx.strokeRect(
-      x0 + lastBlackMoveTo.c * tileSize + 2,
-      y0 + lastBlackMoveTo.r * tileSize + 2,
+      x0 + sq.c * tileSize + 2,
+      y0 + sq.r * tileSize + 2,
       tileSize - 4,
       tileSize - 4
     );
   }
+
+  if (lastBlackMoveFrom) strokeSquare(lastBlackMoveFrom, "rgba(229,62,62,0.85)", 2);
+  if (lastBlackMoveTo) strokeSquare(lastBlackMoveTo, "rgba(229,62,62,1)", 4);
+
 
 
    // Factories (manufacturing) + Deploy panel UI
