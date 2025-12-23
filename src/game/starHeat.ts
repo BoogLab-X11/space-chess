@@ -33,8 +33,17 @@ export function resolveHeatAtTurnStart(state: GameState): void {
  */
 export function markHeatAfterMove(state: GameState, movedSide: "W" | "B"): void {
   const star = starSquare(state);
+
+  // If no star, nobody should be heated.
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== movedSide) continue;
+    p.heated = false;
+  }
+
   if (!star) return;
 
+  // Mark heat only for pieces still adjacent after the move.
   for (const p of state.pieces) {
     if (!p.alive) continue;
     if (p.side !== movedSide) continue;
@@ -44,3 +53,4 @@ export function markHeatAfterMove(state: GameState, movedSide: "W" | "B"): void 
     }
   }
 }
+

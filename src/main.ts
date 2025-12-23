@@ -2,6 +2,8 @@ import { createInitialState } from "./game/setup";
 import { applyMove, applyDeploy, mkMove } from "./game/applyMove";
 import type { GameState, Square } from "./game/types";
 import { pieceAt, staticAt, flyerAt } from "./game/indexes";
+import { hazardTick, maybeSpawnHazards } from "./game/hazards";
+
 
 // --- Audio (retro explosion) ---
 let audioCtx: AudioContext | null = null;
@@ -12,6 +14,8 @@ function getAudioCtx(): AudioContext {
   }
   return audioCtx;
 }
+
+
 
 
 const FILES = "ABCDEFGHIJKLMNOPQRST";
@@ -61,7 +65,15 @@ resizeCanvasToDisplaySize();
 const ROWS = 10;
 const COLS = 20;
 let state: GameState = createInitialState(ROWS, COLS, Date.now());
-const AI_THINK_MS = 900; // tweak this
+const AI_THINK_MS = 1500; // tweak this
+
+// AI difficulty toggle (change manually for now)
+const AI_DIFFICULTY: "easy" | "medium" | "hard" = "hard";
+const AI_EASY_TOP_N = 8;     // easy picks randomly among top N
+const AI_HARD_TOP_N = 20;    // hard search caps candidate actions
+
+
+
 
 // --- Manufacturing / Deploy UI (v0) ---
 let deployOpen = false;
@@ -204,6 +216,13 @@ function screenToSquare(x: number, y: number): Square | null {
   const r = Math.floor((y - y0) / tileSize);
   return { r, c };
 }
+
+function runHazardPhase(state: GameState) {
+  // This mirrors what normally happens after Black acts
+  hazardTick(state);
+  maybeSpawnHazards(state);
+}
+
 
 function nextSquareForDir(pos: Square, dir: "N" | "S" | "E" | "W"): Square {
   switch (dir) {
@@ -388,6 +407,8 @@ let legal: Square[] = [];
 // Last Black move highlights
 let lastBlackMoveFrom: Square | null = null;
 let lastBlackMoveTo: Square | null = null;
+let lastBlackAction: CandidateAction | null = null;
+
 
 type HazardTrail = {
   from: Square;
@@ -421,6 +442,13 @@ type CandidateMove = { from: Square; to: Square };
 type CandidateAction =
   | { kind: "move"; from: Square; to: Square }
   | { kind: "deploy"; to: Square; type: "P" | "N" | "B" | "R" | "Q"; cost: number };
+
+  
+function isExactReverse(prev: CandidateAction, cur: CandidateAction): boolean {
+  if (prev.kind !== "move" || cur.kind !== "move") return false;
+  return prev.from.r === cur.to.r && prev.from.c === cur.to.c &&
+         prev.to.r === cur.from.r && prev.to.c === cur.from.c;
+}
 
 function cloneState(s: GameState): GameState {
   return {
@@ -611,27 +639,139 @@ function chooseBlackAction(state: GameState): CandidateAction | null {
   const candidates = legalActionsForBlack(state);
   if (candidates.length === 0) return null;
 
-  let best: CandidateAction | null = null;
-  let bestScore = -Infinity;
-
-  for (const a of candidates) {
+  // Helper: simulate one action on a clone and return eval score
+  function scoreAfterBlackAction(a: CandidateAction): number {
     const sim = cloneState(state);
 
     if (a.kind === "move") {
-      applyMove(sim, mkMove(a.from, a.to));
+      applyMove(sim, mkMove(a.from, a.to), "tickOnly"); // fair: no spawn peeking
     } else {
-      applyDeploy(sim, a.to, a.type, a.cost);
+      applyDeploy(sim, a.to, a.type, a.cost, "tickOnly"); // fair: no spawn peeking
     }
 
-    const score = evaluateForBlack(sim);
-    if (score > bestScore) {
-      bestScore = score;
-      best = a;
+    return evaluateForBlack(sim);
+  }
+
+  // EASY / MEDIUM: 1-ply scoring of all candidates
+  if (AI_DIFFICULTY === "easy" || AI_DIFFICULTY === "medium") {
+    const scored = candidates.map(a => {
+  let s = scoreAfterBlackAction(a);
+
+  // discourage immediate back-and-forth
+  if (lastBlackAction && isExactReverse(lastBlackAction, a)) {
+    s -= 0.35;
+  }
+
+  return { a, s };
+});
+scored.sort((x, y) => y.s - x.s);
+
+
+    if (AI_DIFFICULTY === "medium") {
+      return scored[0]!.a;
+    }
+
+    // EASY: pick randomly among top N (less consistent, more human)
+    const n = Math.max(1, Math.min(AI_EASY_TOP_N, scored.length));
+    const pick = Math.floor(Math.random() * n);
+    return scored[pick]!.a;
+  }
+
+  // HARD: 2-ply (Black -> best White reply), with candidate caps
+  // We do:
+  //   For each Black action in top N (by quick 1-ply score),
+  //   simulate it, then let White choose best reply (also capped),
+  //   then evaluate resulting state for Black.
+  const scoredBlack = candidates.map(a => {
+  let s = scoreAfterBlackAction(a);
+
+  // discourage immediate back-and-forth
+  if (lastBlackAction && isExactReverse(lastBlackAction, a)) {
+    s -= 0.35;
+  }
+
+  return { a, s };
+});
+scoredBlack.sort((x, y) => y.s - x.s);
+
+
+  const blackN = Math.max(1, Math.min(AI_HARD_TOP_N, scoredBlack.length));
+  const blackPool = scoredBlack.slice(0, blackN);
+
+  let bestA: CandidateAction | null = null;
+  let bestS = -Infinity;
+
+  for (const item of blackPool) {
+    // Sim after Black
+    const sim1 = cloneState(state);
+    if (item.a.kind === "move") {
+      applyMove(sim1, mkMove(item.a.from, item.a.to), "tickOnly");
+    } else {
+      applyDeploy(sim1, item.a.to, item.a.type, item.a.cost, "tickOnly");
+    }
+
+    // Now it's White to move in sim1. Pick White's best reply (1-ply), capped.
+    const whiteMoves: CandidateMove[] = [];
+    if (sim1.sideToMove === "W") {
+      for (const p of sim1.pieces) {
+        if (!p.alive || p.side !== "W") continue;
+        const from = { r: p.pos.r, c: p.pos.c };
+        let dests: Square[] = [];
+
+        if (p.type === "R") {
+          dests = slideLegalDests(sim1, from, [
+            { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+          ]);
+        } else if (p.type === "B") {
+          dests = slideLegalDests(sim1, from, [
+            { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+          ]);
+        } else if (p.type === "Q") {
+          dests = slideLegalDests(sim1, from, [
+            { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+            { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+          ]);
+        } else if (p.type === "P") {
+          dests = pawnLegalDests(sim1, from, "W");
+        } else if (p.type === "N") {
+          dests = knightLegalDests(sim1, from);
+        } else if (p.type === "K") {
+          dests = kingLegalDests(sim1, from);
+        }
+
+        for (const to of dests) whiteMoves.push({ from, to });
+      }
+    }
+
+    // If White has no moves, just evaluate sim1
+    if (whiteMoves.length === 0) {
+      const s = evaluateForBlack(sim1);
+      if (s > bestS) { bestS = s; bestA = item.a; }
+      continue;
+    }
+
+    // Score White replies: White tries to MINIMIZE Black's eval.
+    // Cap to top N by "damage" (i.e., lowest black eval).
+    const scoredWhite = whiteMoves.map(m => {
+      const sim2 = cloneState(sim1);
+      applyMove(sim2, mkMove(m.from, m.to), "tickOnly");
+      return { m, s: evaluateForBlack(sim2) };
+    });
+
+    scoredWhite.sort((x, y) => x.s - y.s); // smallest evalForBlack = best for White
+    const whiteN = Math.max(1, Math.min(AI_HARD_TOP_N, scoredWhite.length));
+    const whiteBest = scoredWhite[0]!.s;
+
+    // Black assumes White plays best reply
+    if (whiteBest > bestS) {
+      bestS = whiteBest;
+      bestA = item.a;
     }
   }
 
-  return best;
+  return bestA;
 }
+
 
 function runBlackAIIfNeeded() {
   if (gameOver) return;
@@ -649,94 +789,109 @@ function runBlackAIIfNeeded() {
     const a = chooseBlackAction(state);
     if (!a) { aiThinking = false; return; }
 
-    // Marker for UI: where Black acted (move-to or deploy square)
-    lastBlackMoveTo = a.kind === "move"
-      ? { r: a.to.r, c: a.to.c }
-      : { r: a.to.r, c: a.to.c };
-
-        // Explosions: snapshot before applying the action
-    const aliveBefore = new Set(
+    // Snapshot A: alive pieces BEFORE Black action
+    const aliveBeforeAction = new Set(
       state.pieces.filter(p => p.alive).map(p => p.id)
     );
 
-    // Flyer snapshot (so we can draw a "hazard step trail" after Black acts)
+    // Flyer snapshot for trails (if you're using it)
     const flyersBefore = state.flyers.map(hz => ({
-  id: hz.id,
-  kind: hz.kind,
-  pos: { r: hz.pos.r, c: hz.pos.c },
-  dir: hz.dir,
-  alive: hz.alive,
-}));
+      id: hz.id,
+      kind: hz.kind,
+      pos: { r: hz.pos.r, c: hz.pos.c },
+      dir: hz.dir,
+      alive: hz.alive,
+    }));
 
-
-    // Apply action
+    // Apply Black action WITHOUT hazard phase (so we can delay hazards)
     if (a.kind === "move") {
-      // Remember Black move squares (for highlight)
       lastBlackMoveFrom = { r: a.from.r, c: a.from.c };
       lastBlackMoveTo = { r: a.to.r, c: a.to.c };
-
-      applyMove(state, mkMove(a.from, a.to));
+      applyMove(state, mkMove(a.from, a.to), "none");
     } else {
-      // Deploy: treat as "from==to" highlight
       lastBlackMoveFrom = { r: a.to.r, c: a.to.c };
       lastBlackMoveTo = { r: a.to.r, c: a.to.c };
-
-      applyDeploy(state, a.to, a.type, a.cost);
+      applyDeploy(state, a.to, a.type, a.cost, "none");
     }
 
-    // Build hazard trails (hazards tick happens after Black acts)
-    // We show where each flyer moved for this hazard phase, briefly.
-    const afterById = new Map(state.flyers.map(hz => [hz.id, { r: hz.pos.r, c: hz.pos.c }]));
-    const nowT = performance.now();
-
-    for (const fb of flyersBefore) {
-      if (!fb.alive) continue;
-
-      const afterPos = afterById.get(fb.id);
-
-      if (afterPos) {
-        // still alive: show movement if it moved
-        if (afterPos.r !== fb.pos.r || afterPos.c !== fb.pos.c) {
-          hazardTrails.push({
-  from: { ...fb.pos },
-  to: { ...afterPos },
-  kind: fb.kind,
-  t0: nowT,
-  ttl: 3000,
-});
-
-        }
-      } else {
-        // disappeared this tick (off-board / hit static / hit piece / etc.)
-        // Show a 1-step trail in its direction to indicate likely impact square.
-        const to = nextSquareForDir(fb.pos, fb.dir);
-       hazardTrails.push({
-  from: { ...fb.pos },
-  to,
-  kind: fb.kind,
-  t0: nowT,
-  ttl: 3000,
-});
-
-      }
-    }
-
-
-    // Explosions: detect deaths caused by the action OR hazard tick OR star burn
+    // Explosions: deaths caused immediately by Black action
     for (const p of state.pieces) {
-      if (aliveBefore.has(p.id) && !p.alive) {
+      if (aliveBeforeAction.has(p.id) && !p.alive) {
         spawnExplosion(p.pos);
       }
     }
 
-    // Win check after Black's action
-    const win = winnerIfAny(state);
-    if (win) gameOver = { winner: win };
+    // Win check after Black action (before hazard phase)
+    const winAfterAction = winnerIfAny(state);
+    if (winAfterAction) {
+      gameOver = { winner: winAfterAction };
+      aiThinking = false;
+      return;
+    }
+
+    // Snapshot B: alive pieces AFTER Black action, BEFORE hazards
+    const aliveBeforeHazards = new Set(
+      state.pieces.filter(p => p.alive).map(p => p.id)
+    );
+
+    // Hazard phase runs later so you can see the position after Black acts
+    window.setTimeout(() => {
+      if (gameOver) return;
+
+      runHazardPhase(state);
+
+      // Trails (optional): compare flyersBefore to current flyers
+      const afterById = new Map(state.flyers.map(hz => [hz.id, { r: hz.pos.r, c: hz.pos.c }]));
+      const nowT = performance.now();
+
+      for (const fb of flyersBefore) {
+        if (!fb.alive) continue;
+
+        const afterPos = afterById.get(fb.id);
+        if (afterPos) {
+          if (afterPos.r !== fb.pos.r || afterPos.c !== fb.pos.c) {
+            hazardTrails.push({
+              from: { ...fb.pos },
+              to: { ...afterPos },
+              kind: fb.kind,
+              t0: nowT,
+              ttl: 900,
+            });
+          }
+        } else {
+          const to = nextSquareForDir(fb.pos, fb.dir);
+          hazardTrails.push({
+            from: { ...fb.pos },
+            to,
+            kind: fb.kind,
+            t0: nowT,
+            ttl: 900,
+          });
+        }
+      }
+
+      // Explosions: deaths caused by hazard phase only
+      for (const p of state.pieces) {
+        if (aliveBeforeHazards.has(p.id) && !p.alive) {
+          spawnExplosion(p.pos);
+        }
+      }
+
+      // Win check after hazard phase (hazards can kill kings)
+      const winAfterHazards = winnerIfAny(state);
+      if (winAfterHazards) gameOver = { winner: winAfterHazards };
+
+    }, BLACK_HAZARD_DELAY_MS);
 
     aiThinking = false;
   }, AI_THINK_MS);
 }
 
+
+
+
+// Pause between Black move and hazard phase (for debugging / clarity)
+const BLACK_HAZARD_DELAY_MS = 700; // try 500–1000
 
 
 canvas.addEventListener("click", (ev) => {
@@ -832,12 +987,7 @@ canvas.addEventListener("click", (ev) => {
       legal = [];
       deployOpen = false;
 
-      // Explosions: anything that died during deploy (star burn, hazard tick if Black was mover, etc.)
-      for (const p of state.pieces) {
-        if (aliveBefore.has(p.id) && !p.alive) {
-          spawnExplosion(p.pos);
-        }
-      }
+     
 
       // Win check (deploy can cause star-burn deaths)
       const win = winnerIfAny(state);
@@ -855,6 +1005,8 @@ canvas.addEventListener("click", (ev) => {
     // Close panel for simplicity.
     deployOpen = false;
     return;
+
+
   }
 
 
@@ -911,17 +1063,26 @@ canvas.addEventListener("click", (ev) => {
 
   return;
 }
+// Snapshot: alive pieces BEFORE White move
+const aliveBeforeAction = new Set(
+  state.pieces.filter(p => p.alive).map(p => p.id)
+);
 
-  // attempt move
-  applyMove(state, mkMove(selected, sq));
-selected = null;
-legal = [];
+// attempt move
+applyMove(state, mkMove(selected, sq));
 
+// Explosions: anything that died due to this move (capture, suicide into hazard, star burn, etc.)
 for (const p of state.pieces) {
-  if (aliveBefore.has(p.id) && !p.alive) {
+  if (aliveBeforeAction.has(p.id) && !p.alive) {
     spawnExplosion(p.pos);
   }
 }
+
+selected = null;
+legal = [];
+
+
+
 
 
 // Check win after White's move

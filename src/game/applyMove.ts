@@ -172,19 +172,26 @@ function isQueenMoveLegal(state: GameState, from: Square, to: Square): boolean {
 }
 
 
-function postMoveHazardsAndTurnAdvance(state: GameState, moverSide: "W" | "B"): void {
-  // New rule: hazards tick once per full round:
-  // White move, Black move, Hazards tick, repeat.
-  // So only tick hazards after Black has moved.
+type SimMode = "full" | "tickOnly" | "none";
+
+function postMoveHazardsAndTurnAdvance(state: GameState, moverSide: "W" | "B", simMode: SimMode): void {
+  // Hazards tick once per full round: after Black acts.
   if (moverSide === "B") {
-    
+  if (simMode === "full") {
     hazardTick(state);
     maybeSpawnHazards(state);
+  } else if (simMode === "tickOnly") {
+    hazardTick(state);
+  } else {
+    // simMode === "none": do not tick hazards, do not spawn
   }
+}
+
 
   state.sideToMove = other(state.sideToMove);
   state.ply += 1;
 }
+
 
 
 /**
@@ -195,7 +202,8 @@ function postMoveHazardsAndTurnAdvance(state: GameState, moverSide: "W" | "B"): 
  * - After each move: hazards spawn+tick, then side changes.
  * - Star heat is enforced at the start of the mover's turn, and heat is marked after a move.
  */
-export function applyMove(state: GameState, move: Move): void {
+export function applyMove(state: GameState, move: Move, simMode: SimMode = "full"): void {
+
   // Start-of-turn: resolve burn for heated pieces of this side
     // Star heat rule:
   // If a piece was heated at the start of this side's turn, it must end this turn NOT adjacent to a star,
@@ -245,7 +253,7 @@ export function applyMove(state: GameState, move: Move): void {
       state.flyers = state.flyers.filter(h => h.alive);
 
       burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
-      postMoveHazardsAndTurnAdvance(state, mover.side);
+      postMoveHazardsAndTurnAdvance(state, mover.side, simMode);
       return;
     } else {
       // Asteroid: collect (+1 manufacturing), asteroid disappears, mover survives
@@ -272,7 +280,7 @@ export function applyMove(state: GameState, move: Move): void {
   mover.pos = { ...move.to };
   mover.alive = false;
   burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
-  postMoveHazardsAndTurnAdvance(state, mover.side);
+  postMoveHazardsAndTurnAdvance(state, mover.side, simMode);
   return;
 }
 
@@ -285,7 +293,7 @@ export function applyMove(state: GameState, move: Move): void {
   burnOverheatedPiecesIfStillAdjacentToStar(state, mover.side, overheatedIdsAtTurnStart);
 
 
- postMoveHazardsAndTurnAdvance(state, mover.side);
+ postMoveHazardsAndTurnAdvance(state, mover.side,simMode);
 }
 
 export function mkMove(from: Square, to: Square): Move {
@@ -306,8 +314,11 @@ export function applyDeploy(
   state: GameState,
   to: Square,
   type: PieceType,
-  cost: number
+  cost: number,
+  simMode: SimMode = "full"
 ): void {
+
+
   const side = state.sideToMove;
 
   // Record who was heated at turn start (same logic as applyMove)
@@ -351,6 +362,6 @@ export function applyDeploy(
   burnOverheatedPiecesIfStillAdjacentToStar(state, side, overheatedIdsAtTurnStart);
 
   // Finish the turn exactly like a move does
-  postMoveHazardsAndTurnAdvance(state, side);
+  postMoveHazardsAndTurnAdvance(state, side, simMode);
 }
 
