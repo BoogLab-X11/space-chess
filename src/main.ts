@@ -56,9 +56,19 @@ const AI_THINK_MS = 900; // tweak this
 // --- Manufacturing / Deploy UI (v0) ---
 let deployOpen = false;
 
-// What can we deploy (v0: single ship)?
-const DEPLOY_TYPE: "P" = "P";
-const DEPLOY_COST = 3; // tweak: asteroid gives +1, so 3 is a meaningful spend
+// Standard chess manufacturing costs
+const DEPLOY_COSTS: Record<"P" | "N" | "B" | "R" | "Q", number> = {
+  P: 1,
+  N: 3,
+  B: 3,
+  R: 5,
+  Q: 9,
+};
+
+// Only 1 ship can be deployed per deploy action.
+// The GUI selects exactly one type at a time:
+let selectedDeployType: "P" | "N" | "B" | "R" | "Q" = "P";
+
 
 // Helper: home row for deployment (rank 1 for White, rank 10 for Black)
 function deployHomeRowFor(side: "W" | "B"): number {
@@ -66,9 +76,17 @@ function deployHomeRowFor(side: "W" | "B"): number {
 }
 
 function canDeployNow(s: GameState): boolean {
+  if (gameOver) return false;
+
   const side = s.sideToMove;
-  return s.manufacturing[side] >= DEPLOY_COST && !gameOver;
+
+  // White-only deploy for now (matching your current rules)
+  if (side !== "W") return false;
+
+  const cost = DEPLOY_COSTS[selectedDeployType];
+  return s.manufacturing.W >= cost;
 }
+
 
 // UI rects (computed from current viewport)
 type Rect = { x: number; y: number; w: number; h: number };
@@ -93,8 +111,8 @@ function getUiRects(viewW: number, viewH: number) {
   const factoryW: Rect = { x: fx, y: y0 + boardH - size, w: size, h: size };
 
   // Deploy panel (centered-ish)
-  const panelW = 420;
-  const panelH = 220;
+  const panelW = 320;
+  const panelH = 320;
   const panel: Rect = {
     x: Math.floor((viewW - panelW) / 2),
     y: Math.floor((viewH - panelH) / 2),
@@ -105,6 +123,37 @@ function getUiRects(viewW: number, viewH: number) {
   return { factoryB, factoryW, panel };
 }
 
+type DeployChoice = {
+  type: "P" | "N" | "B" | "R" | "Q";
+  cost: number;
+  rect: Rect;
+};
+
+function getDeployChoices(panel: Rect): DeployChoice[] {
+  // Layout inside panel
+  const left = panel.x + 16;
+  const top = panel.y + 92; // below title/cost text area
+  const rowH = 30;
+  const rowW = panel.w - 32;
+
+  const order: Array<"P" | "N" | "B" | "R" | "Q"> = ["P", "N", "B", "R", "Q"];
+
+  return order.map((t, i) => ({
+    type: t,
+    cost: DEPLOY_COSTS[t],
+    rect: { x: left, y: top + i * rowH, w: rowW, h: rowH - 4 },
+  }));
+}
+
+function shipLabel(t: "P" | "N" | "B" | "R" | "Q"): string {
+  switch (t) {
+    case "P": return "Pawn";
+    case "N": return "Knight";
+    case "B": return "Bishop";
+    case "R": return "Rook";
+    case "Q": return "Queen";
+  }
+}
 
 
 
@@ -529,11 +578,29 @@ canvas.addEventListener("click", (ev) => {
 
 
   // If deploy panel is open, clicks behave differently
-  if (deployOpen) {
-    // Clicking inside the panel just interacts with UI (no board clicks)
+   if (deployOpen) {
+    // Clicking inside the panel: select which ship to deploy (only one at a time)
     if (pointInRect(x, y, panel)) {
+      // White-only deploy UI for now
+      if (state.sideToMove !== "W") return;
+
+      const mp = state.manufacturing.W;
+      const choices = getDeployChoices(panel);
+
+      for (const ch of choices) {
+        if (!pointInRect(x, y, ch.rect)) continue;
+
+        // Only allow selecting choices you can afford
+        if (mp >= ch.cost) {
+          selectedDeployType = ch.type;
+        }
+        return;
+      }
+
+      // Clicked inside panel but not on a row: do nothing
       return;
     }
+
 
     // Clicking outside the panel: treat it as "attempt deploy on clicked square",
     // otherwise close the panel.
@@ -561,8 +628,12 @@ canvas.addEventListener("click", (ev) => {
       state.pieces.filter(p => p.alive).map(p => p.id)
     );
 
+      const chosenType = selectedDeployType;
+    const chosenCost = DEPLOY_COSTS[chosenType];
+
     // Attempt deploy (consumes turn if it succeeds)
-    applyDeploy(state, sq, DEPLOY_TYPE, DEPLOY_COST);
+    applyDeploy(state, sq, chosenType, chosenCost);
+
 
     // If turn advanced, deployment succeeded. (applyDeploy always advances on success.)
     // We'll detect success by checking if sideToMove flipped away from W.
@@ -684,7 +755,7 @@ for (const p of state.pieces) {
 
 function playExplosionSound() {
   const ctx = getAudioCtx();
-  const duration = 0.8; // seconds
+  const duration = 2; // seconds
   const sampleRate = ctx.sampleRate;
   const frameCount = Math.floor(sampleRate * duration);
 
@@ -728,7 +799,7 @@ function playExplosionSound() {
   source.stop(ctx.currentTime + duration);
 }
 
-function spawnExplosion(sq: Square, ttl = 1000) {
+function spawnExplosion(sq: Square, ttl = 3000) {
   explosions.push({ sq, t0: performance.now(), ttl });
   playExplosionSound();
 }
@@ -1062,26 +1133,62 @@ function draw(state: GameState) {
 
     ctx.font = "14px system-ui, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.fillText(`Cost: ${DEPLOY_COST} 🏭`, panel.x + 16, panel.y + 48);
-    ctx.fillText(`Type: ${DEPLOY_TYPE}`, panel.x + 16, panel.y + 70);
-
     const side = state.sideToMove;
     const mp = state.manufacturing[side];
-    const need = Math.max(0, DEPLOY_COST - mp);
 
-    if (!canDeployNow(state)) {
-      ctx.fillStyle = "rgba(255,120,120,0.95)";
+    ctx.fillText(`Points: ${mp} 🏭`, panel.x + 16, panel.y + 48);
+    ctx.fillText(`Selected: ${selectedDeployType} (${shipLabel(selectedDeployType)})`, panel.x + 16, panel.y + 70);
+
+    // Ship list (only one selectable at a time)
+    const choices = getDeployChoices(panel);
+
+    for (const ch of choices) {
+      const affordable = mp >= ch.cost;
+      const selectedRow = ch.type === selectedDeployType;
+
+      ctx.save();
+
+      // row background
+      ctx.fillStyle = selectedRow
+        ? "rgba(72,187,120,0.22)"
+        : "rgba(255,255,255,0.06)";
+      ctx.globalAlpha = affordable ? 1 : 0.35;
+      ctx.fillRect(ch.rect.x, ch.rect.y, ch.rect.w, ch.rect.h);
+
+      // row border
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(ch.rect.x, ch.rect.y, ch.rect.w, ch.rect.h);
+
+      // row text
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = "14px system-ui, sans-serif";
       ctx.fillText(
-        side !== "W"
-          ? "Deploy UI is White-only (for now)."
-          : `Not enough manufacturing: need ${need} more.`,
-        panel.x + 16,
-        panel.y + 110
+        `${ch.type}  ${shipLabel(ch.type)}   —   ${ch.cost} 🏭`,
+        ch.rect.x + 10,
+        ch.rect.y + ch.rect.h / 2
       );
+
+      ctx.restore();
+    }
+
+
+        const chosenCost = DEPLOY_COSTS[selectedDeployType];
+    const need = Math.max(0, chosenCost - mp);
+
+    if (side !== "W") {
+      ctx.fillStyle = "rgba(255,120,120,0.95)";
+      ctx.fillText("Deploy UI is White-only (for now).", panel.x + 16, panel.y + 92 + 5 * 30 + 10);
+    } else if (mp < chosenCost) {
+      ctx.fillStyle = "rgba(255,120,120,0.95)";
+      ctx.fillText(`Not enough points for ${selectedDeployType}: need ${need} more.`, panel.x + 16, panel.y + 92 + 5 * 30 + 10);
     } else {
       ctx.fillStyle = "rgba(200,255,200,0.95)";
-      ctx.fillText("Click a square on rank 1 to deploy.", panel.x + 16, panel.y + 110);
+      ctx.fillText("Click a square on rank 1 to deploy.", panel.x + 16, panel.y + 92 + 5 * 30 + 10);
     }
+
 
     ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.fillText("Click outside this panel to close.", panel.x + 16, panel.y + panel.h - 34);
