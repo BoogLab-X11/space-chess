@@ -49,6 +49,7 @@ function pickEdgeBandColumn(state: GameState, rng: () => number): number {
 }
 
 export function maybeSpawnHazards(state: GameState): void {
+ // console.trace("maybeSpawnHazards called");
   const rng = mulberry32(state.rngSeed);
   // advance seed for next time
   state.rngSeed = (state.rngSeed + 0x9e3779b9) >>> 0;

@@ -20,6 +20,29 @@ function getAudioCtx(): AudioContext {
 
 const FILES = "ABCDEFGHIJKLMNOPQRST";
 
+// --- Piece sprites (pixel art) ---
+const PIECE_W = 16;
+const PIECE_H = 32;
+
+const pieceSprites: Record<string, HTMLImageElement> = {};
+
+function loadPieceSprites() {
+  const sides = ["W", "B"];
+  const types = ["King", "Queen", "Rook", "Bishop", "Knight", "Pawn"];
+
+  for (const s of sides) {
+    for (const t of types) {
+      const key = `${s}_${t}`;
+      const img = new Image();
+      img.src = `/pieces/${key}.png`;
+      pieceSprites[key] = img;
+    }
+  }
+}
+
+loadPieceSprites();
+
+
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app not found");
 
@@ -46,6 +69,7 @@ app.appendChild(canvas);
 
 const ctx = canvas.getContext("2d")!;
 if (!ctx) throw new Error("2D context not available");
+ctx.imageSmoothingEnabled = false;
 
 window.addEventListener("keydown", (e) => {
   if (e.key.toLowerCase() === "r") resetGame();
@@ -1352,32 +1376,53 @@ function draw(state: GameState) {
   ctx.restore();
 }
 
-  // Pieces
-  for (const p of state.pieces) {
-    if (!p.alive) continue;
+  // Pieces (pixel-art sprites)
+for (const p of state.pieces) {
+  if (!p.alive) continue;
 
-    const cx = x0 + (p.pos.c + 0.5) * tileSize;
-    const cy = y0 + (p.pos.r + 0.5) * tileSize;
+  const cx = x0 + (p.pos.c + 0.5) * tileSize;
+  const cy = y0 + (p.pos.r + 0.5) * tileSize;
 
-    ctx.fillStyle = p.side === "W" ? "#f7fafc" : "#1a202c";
+  const name =
+    p.type === "K" ? "King" :
+    p.type === "Q" ? "Queen" :
+    p.type === "R" ? "Rook" :
+    p.type === "B" ? "Bishop" :
+    p.type === "N" ? "Knight" :
+    "Pawn";
+
+  const key = `${p.side}_${name}`;
+  const img = pieceSprites[key];
+
+  if (!img || !img.complete) continue;
+
+  // Integer scaling for crisp pixels
+  const scale = Math.max(2, Math.floor(tileSize / PIECE_H));
+  const w = PIECE_W * scale;
+  const h = PIECE_H * scale;
+
+  // Vertical optical centering tweak
+const yOffset = Math.floor(h * 0.15); // tweak: 0.12–0.20 works well
+
+ctx.drawImage(
+  img,
+  Math.round(cx - w / 2),
+  Math.round(cy - h / 2 - yOffset),
+  w,
+  h
+);
+
+
+  // Heat ring (unchanged)
+  if (p.heated) {
+    ctx.strokeStyle = "rgba(246,224,94,0.9)";
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.32, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (p.heated) {
-      ctx.strokeStyle = "rgba(246,224,94,0.9)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(cx, cy, tileSize * 0.36, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    ctx.fillStyle = p.side === "W" ? "#1a202c" : "#f7fafc";
-    ctx.font = `${Math.floor(tileSize * 0.32)}px system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(p.type, cx, cy);
+    ctx.arc(cx, cy, tileSize * 0.42, 0, Math.PI * 2);
+    ctx.stroke();
   }
+}
+
 
     // Explosions (short-lived)
   const now = performance.now();
