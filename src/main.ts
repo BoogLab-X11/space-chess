@@ -1396,10 +1396,27 @@ for (const p of state.pieces) {
 
   if (!img || !img.complete) continue;
 
-  // Integer scaling for crisp pixels
-  const scale = Math.max(2, Math.floor(tileSize / PIECE_H));
-  const w = PIECE_W * scale;
-  const h = PIECE_H * scale;
+// Integer scaling for crisp pixels with min & max bounds
+const minScale = 1;
+const maxScale = 6; // desktop can go higher now (tweak 4–8)
+
+// Target height: allow the piece to be ~110% of a tile so it feels "chess-sized"
+const targetH = tileSize * 1.10;
+
+// Use round so it can jump to 3 on desktop instead of sticking at 2
+const scale = Math.max(
+  minScale,
+  Math.min(
+    maxScale,
+    Math.round(targetH / PIECE_H)
+  )
+);
+
+const w = PIECE_W * scale;
+const h = PIECE_H * scale;
+
+
+
 
   // Vertical optical centering tweak
 const yOffset = Math.floor(h * 0.15); // tweak: 0.12–0.20 works well
