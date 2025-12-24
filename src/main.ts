@@ -372,6 +372,27 @@ function knightLegalDests(state: GameState, from: Square): Square[] {
   return out;
 }
 
+function hazardNextSquare(pos: Square, dir: "N" | "S" | "E" | "W"): Square {
+  switch (dir) {
+    case "N": return { r: pos.r - 1, c: pos.c };
+    case "S": return { r: pos.r + 1, c: pos.c };
+    case "E": return { r: pos.r, c: pos.c + 1 };
+    case "W": return { r: pos.r, c: pos.c - 1 };
+  }
+}
+
+function willAnyCometHitSquareNextTick(state: GameState, sq: Square): boolean {
+  for (const hz of state.flyers) {
+    if (!hz.alive) continue;
+    if (hz.kind !== "comet") continue; // only comets are lethal
+
+    const nxt = hazardNextSquare(hz.pos, hz.dir);
+    if (nxt.r === sq.r && nxt.c === sq.c) return true;
+  }
+  return false;
+}
+
+
 function kingLegalDests(state: GameState, from: Square): Square[] {
   const out: Square[] = [];
 
@@ -406,6 +427,7 @@ function winnerIfAny(state: GameState): "W" | "B" | null {
 }
 
 let gameOver: { winner: "W" | "B" } | null = null;
+let lastBlackMovedPieceId: string | null = null;
 
 function resetGame(seed = Date.now()) {
   state = createInitialState(ROWS, COLS, seed);
@@ -416,6 +438,7 @@ function resetGame(seed = Date.now()) {
     lastBlackMoveFrom = null;
   lastBlackMoveTo = null;
   hazardTrails.length = 0;
+  
 
   lastBlackMoveTo = null;
   aiThinking = false;
@@ -468,6 +491,23 @@ type CandidateAction =
   | { kind: "deploy"; to: Square; type: "P" | "N" | "B" | "R" | "Q"; cost: number };
 
   
+function willHazardHitSquare(state: GameState, sq: Square): boolean {
+  for (const hz of state.flyers) {
+    if (!hz.alive) continue;
+
+    let dr = 0, dc = 0;
+    if (hz.dir === "N") dr = -1;
+    if (hz.dir === "S") dr = 1;
+    if (hz.dir === "E") dc = 1;
+    if (hz.dir === "W") dc = -1;
+
+    const next = { r: hz.pos.r + dr, c: hz.pos.c + dc };
+    if (next.r === sq.r && next.c === sq.c) return true;
+  }
+  return false;
+}
+
+
 function isExactReverse(prev: CandidateAction, cur: CandidateAction): boolean {
   if (prev.kind !== "move" || cur.kind !== "move") return false;
   return prev.from.r === cur.to.r && prev.from.c === cur.to.c &&
@@ -551,8 +591,97 @@ function evaluateForBlack(state: GameState): number {
   // Manufacturing advantage matters a bit (small weight)
   score += 0.30 * (state.manufacturing.B - state.manufacturing.W);
 
+  // Penalize Black pieces standing in imminent hazard paths
+for (const p of state.pieces) {
+  if (!p.alive) continue;
+  if (p.side !== "B") continue;
+
+  if (willHazardHitSquare(state, p.pos)) {
+    score -= 2.5; // strong "get out of the way" signal
+  }
+}
+
+  // Avoid standing in the path of a comet that will hit next hazard tick
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+
+    // If a BLACK piece is about to be hit, that's bad for Black
+    if (p.side === "B" && willAnyCometHitSquareNextTick(state, p.pos)) {
+      score -= 3.0;
+    }
+
+    // If a WHITE piece is about to be hit, that's good for Black (tiny bonus)
+    if (p.side === "W" && willAnyCometHitSquareNextTick(state, p.pos)) {
+      score += 0.8;
+    }
+  }
+
+  // --- Positional incentives ---
+
+  // Mobility: prefer positions where Black has more options than White
+  const mobB = countLegalMovesForSide(state, "B");
+  const mobW = countLegalMovesForSide(state, "W");
+  score += 0.03 * (mobB - mobW); // tweak 0.02–0.06
+
+  // Light "development" nudge: encourage Black pieces (not pawns/king) off back rank
+  // Internal row 0 is Black's back rank (rank 10).
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+
+    if (p.side === "B" && (p.type === "N" || p.type === "B" || p.type === "R" || p.type === "Q")) {
+      if (p.pos.r === 0) score -= 0.08;
+    }
+
+    // (optional) tiny inverse for White development, helps Black avoid letting White develop freely
+    if (p.side === "W" && (p.type === "N" || p.type === "B" || p.type === "R" || p.type === "Q")) {
+      if (p.pos.r === state.rows - 1) score += 0.04;
+    }
+  }
+
   return score;
 }
+
+function countLegalMovesForSide(state: GameState, side: "W" | "B"): number {
+  const saved = state.sideToMove;
+  state.sideToMove = side;
+
+  let count = 0;
+
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== side) continue;
+
+    const from = { r: p.pos.r, c: p.pos.c };
+    let dests: Square[] = [];
+
+    if (p.type === "R") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+      ]);
+    } else if (p.type === "B") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "Q") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "P") {
+      dests = pawnLegalDests(state, from, side);
+    } else if (p.type === "N") {
+      dests = knightLegalDests(state, from);
+    } else if (p.type === "K") {
+      dests = kingLegalDests(state, from);
+    }
+
+    count += dests.length;
+  }
+
+  state.sideToMove = saved;
+  return count;
+}
+
 
 function legalMovesForBlack(state: GameState): CandidateMove[] {
   if (state.sideToMove !== "B") return [];
@@ -678,12 +807,15 @@ function chooseBlackAction(state: GameState): CandidateAction | null {
 
   // EASY / MEDIUM: 1-ply scoring of all candidates
   if (AI_DIFFICULTY === "easy" || AI_DIFFICULTY === "medium") {
-    const scored = candidates.map(a => {
+  const scored = candidates.map(a => {
   let s = scoreAfterBlackAction(a);
 
-  // discourage immediate back-and-forth
-  if (lastBlackAction && isExactReverse(lastBlackAction, a)) {
-    s -= 0.35;
+  // Discourage moving the same piece two Black turns in a row
+  if (a.kind === "move" && lastBlackMovedPieceId) {
+    const mover = pieceAt(state, a.from);
+    if (mover && mover.id === lastBlackMovedPieceId) {
+      s -= 0.35; // tweak 0.2–0.6
+    }
   }
 
   return { a, s };
@@ -797,6 +929,8 @@ scoredBlack.sort((x, y) => y.s - x.s);
 }
 
 
+
+
 function runBlackAIIfNeeded() {
   if (gameOver) return;
   if (state.sideToMove !== "B") return;
@@ -812,6 +946,14 @@ function runBlackAIIfNeeded() {
 
     const a = chooseBlackAction(state);
     if (!a) { aiThinking = false; return; }
+
+    if (a.kind === "move") {
+  const mover = pieceAt(state, a.from);
+  lastBlackMovedPieceId = mover ? mover.id : null;
+} else {
+  lastBlackMovedPieceId = null; // deploy shouldn't “lock” repetition
+}
+
 
     // Snapshot A: alive pieces BEFORE Black action
     const aliveBeforeAction = new Set(
