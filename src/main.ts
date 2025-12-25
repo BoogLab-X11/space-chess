@@ -35,7 +35,7 @@ function loadPieceSprites() {
     for (const t of types) {
       const key = `${s}_${t}`;
       const img = new Image();
-      img.src = `/pieces/${key}.png`;
+      img.src = `${import.meta.env.BASE_URL}pieces/${key}.png`;
       pieceSprites[key] = img;
     }
   }
