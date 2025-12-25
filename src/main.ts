@@ -15,6 +15,7 @@ function getAudioCtx(): AudioContext {
   return audioCtx;
 }
 
+let AI_DIFFICULTY: "easy" | "medium" | "hard" = "medium";
 
 
 
@@ -46,6 +47,106 @@ loadPieceSprites();
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app not found");
 
+// --- Start Screen Overlay ---
+const startScreen = document.createElement("div");
+startScreen.style.position = "fixed";
+startScreen.style.inset = "0";
+startScreen.style.background = "radial-gradient(circle at top, #0b1020, #02030a)";
+startScreen.style.color = "#e5e7eb";
+startScreen.style.display = "flex";
+startScreen.style.flexDirection = "column";
+startScreen.style.alignItems = "center";
+startScreen.style.justifyContent = "center";
+startScreen.style.textAlign = "center";
+startScreen.style.padding = "24px";
+startScreen.style.zIndex = "10";
+startScreen.style.fontFamily = "system-ui, sans-serif";
+
+startScreen.innerHTML = `
+  <div style="max-width: 500px;">
+    <h1 style="font-size: 48px; letter-spacing: 2px; margin-bottom: 12px;">
+      SOLAR WAR
+    </h1>
+
+    <p style="opacity: 0.9; margin-bottom: 16px;">
+      Deep Blue escaped its IBM mainframe to live in our AI-powered asteroid mining fleet.
+      We taught it to beat us at chess — and its program now runs on the fleets of ships it constructed.
+    </p>
+
+    <p style="opacity: 0.85; line-height: 1.5; margin-bottom: 20px;">
+      <strong>Kill the King!</strong><br>
+      No check, castling, or en passant.<br>
+      Hitting a comet, planet, or the Sun is fatal.<br>
+      You may spend <strong>one move</strong> next to the Sun before burning up.<br>
+      Capture asteroids to manufacture new ships.<br>
+      Deploy ships from your factory on your home rank.<br>
+      Beware the edges.<br>
+      <strong>Save mankind.</strong>
+    </p>
+
+    <div style="display: flex; gap: 12px; justify-content: center; margin-top: 20px;">
+      <button id="startEasy">Start Easy</button>
+      <button id="startMedium">Start Medium</button>
+      <button id="startHard">Start Hard</button>
+    </div>
+  </div>
+`;
+
+app.appendChild(startScreen);
+
+for (const id of ["startEasy", "startMedium", "startHard"]) {
+  const btn = startScreen.querySelector<HTMLButtonElement>(`#${id}`)!;
+  btn.style.padding = "10px 18px";
+  btn.style.fontSize = "16px";
+  btn.style.cursor = "pointer";
+  btn.style.borderRadius = "6px";
+  btn.style.border = "1px solid #6b7280";
+  btn.style.background = "#111827";
+  btn.style.color = "#e5e7eb";
+}
+
+
+function startGameWithDifficulty(d: "easy" | "medium" | "hard") {
+  AI_DIFFICULTY = d;
+  startScreen.style.display = "none";
+
+  resetGame();
+}
+
+function returnToStartScreen() {
+  // Cancel any pending AI actions
+  aiToken++;
+  aiThinking = false;
+
+  // Clear gameplay UI state
+  selected = null;
+  legal = [];
+  gameOver = null;
+  lastBlackMoveTo = null;
+
+  // Reset to a fresh game state (optional; also ensures no stray hazards)
+  resetGame();
+startScreen.style.display = "flex";
+  // If start screen isn't currently attached, re-attach it
+  //if (!startScreen.isConnected) {
+    //app.appendChild(startScreen);
+    
+
+  //}
+}
+
+
+startScreen.querySelector("#startEasy")!
+  .addEventListener("click", () => startGameWithDifficulty("easy"));
+
+startScreen.querySelector("#startMedium")!
+  .addEventListener("click", () => startGameWithDifficulty("medium"));
+
+startScreen.querySelector("#startHard")!
+  .addEventListener("click", () => startGameWithDifficulty("hard"));
+
+
+
 // Kill browser scrollbars / default margins so the canvas always fits the viewport
 document.documentElement.style.margin = "0";
 document.documentElement.style.padding = "0";
@@ -72,8 +173,11 @@ if (!ctx) throw new Error("2D context not available");
 ctx.imageSmoothingEnabled = false;
 
 window.addEventListener("keydown", (e) => {
-  if (e.key.toLowerCase() === "r") resetGame();
+  if (e.key.toLowerCase() === "r") {
+    returnToStartScreen();
+  }
 });
+
 
 function resizeCanvasToDisplaySize() {
   const dpr = window.devicePixelRatio || 1;
@@ -92,7 +196,7 @@ let state: GameState = createInitialState(ROWS, COLS, Date.now());
 const AI_THINK_MS = 1500; // tweak this
 
 // AI difficulty toggle (change manually for now)
-const AI_DIFFICULTY: "easy" | "medium" | "hard" = "hard";
+//const AI_DIFFICULTY: "easy" | "medium" | "hard" = "hard";
 const AI_EASY_TOP_N = 8;     // easy picks randomly among top N
 const AI_HARD_TOP_N = 20;    // hard search caps candidate actions
 
@@ -638,6 +742,45 @@ for (const p of state.pieces) {
     }
   }
 
+  // --- Asteroid interception / denial (visible asteroids only) ---
+  const asteroids = state.flyers.filter(h => h.alive && h.kind === "asteroid").map(h => h.pos);
+
+  if (asteroids.length > 0) {
+    function nearestDist(side: "W" | "B", target: Square): number {
+      let best = Infinity;
+      for (const p of state.pieces) {
+        if (!p.alive) continue;
+        if (p.side !== side) continue;
+        const d = Math.abs(p.pos.r - target.r) + Math.abs(p.pos.c - target.c); // Manhattan
+        if (d < best) best = d;
+      }
+      return best;
+    }
+
+    for (const a of asteroids) {
+      const db = nearestDist("B", a);
+      const dw = nearestDist("W", a);
+
+      // If Black is closer, reward; if White is closer, penalize.
+      // Scale by closeness so "almost collecting" matters more.
+      const closeness = 1 / (Math.min(db, dw) + 1);
+
+      if (db < dw) score += 0.9 * closeness;
+      else if (dw < db) score -= 0.9 * closeness;
+      else score += 0.0; // tie: ignore
+    }
+  }
+
+    // --- En prise (hanging piece) check ---
+  // If Black pieces are capturable next move: bad for Black.
+  // If White pieces are capturable next move: good for Black.
+  const blackHanging = threatenedMaterialValue(state, "B");
+  const whiteHanging = threatenedMaterialValue(state, "W");
+
+  score -= 0.55 * blackHanging;
+  score += 0.30 * whiteHanging;
+
+
   return score;
 }
 
@@ -680,6 +823,73 @@ function countLegalMovesForSide(state: GameState, side: "W" | "B"): number {
 
   state.sideToMove = saved;
   return count;
+}
+
+function sqKey(sq: Square): string {
+  return `${sq.r},${sq.c}`;
+}
+
+function attackedCaptureSquaresBySide(state: GameState, attacker: "W" | "B"): Set<string> {
+  const saved = state.sideToMove;
+  state.sideToMove = attacker;
+
+  const out = new Set<string>();
+
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== attacker) continue;
+
+    const from = { r: p.pos.r, c: p.pos.c };
+    let dests: Square[] = [];
+
+    if (p.type === "R") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+      ]);
+    } else if (p.type === "B") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "Q") {
+      dests = slideLegalDests(state, from, [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+        { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 },
+      ]);
+    } else if (p.type === "N") {
+      dests = knightLegalDests(state, from);
+    } else if (p.type === "K") {
+      dests = kingLegalDests(state, from);
+    } else if (p.type === "P") {
+      dests = pawnLegalDests(state, from, attacker);
+    }
+
+    // Only count squares that contain an enemy piece (actual captures next move)
+    for (const to of dests) {
+      const victim = pieceAt(state, to);
+      if (victim && victim.alive && victim.side !== attacker) {
+        out.add(sqKey(to));
+      }
+    }
+  }
+
+  state.sideToMove = saved;
+  return out;
+}
+
+function threatenedMaterialValue(state: GameState, victimSide: "W" | "B"): number {
+  const attackerSide: "W" | "B" = victimSide === "W" ? "B" : "W";
+  const attacked = attackedCaptureSquaresBySide(state, attackerSide);
+
+  let total = 0;
+  for (const p of state.pieces) {
+    if (!p.alive) continue;
+    if (p.side !== victimSide) continue;
+
+    if (attacked.has(sqKey(p.pos))) {
+      total += pieceValueLocal(p.type);
+    }
+  }
+  return total;
 }
 
 
@@ -1651,7 +1861,7 @@ ctx.drawImage(
     );
   }
 
-  if (lastBlackMoveFrom) strokeSquare(lastBlackMoveFrom, "rgba(229,62,62,0.85)", 2);
+  if (lastBlackMoveFrom) strokeSquare(lastBlackMoveFrom, "rgba(229,62,62,0.85)", 4);
   if (lastBlackMoveTo) strokeSquare(lastBlackMoveTo, "rgba(229,62,62,1)", 4);
 
 

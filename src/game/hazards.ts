@@ -62,7 +62,7 @@ export function maybeSpawnHazards(state: GameState): void {
   const spawnChanceCometHoriz = 0.35; // per flyer tick
   const spawnChanceCometVert = 0.20;
 
-  const spawnChanceAsteroidVert = 0.12;
+  const spawnChanceAsteroidVert = 0.42;
 
   // --------------------
   // HORIZONTAL COMETS (hazards) — ONLY A/T, belt rows only
